@@ -18,9 +18,9 @@ use tokio::sync::mpsc;
 use crate::config::{load_from_path, AppConfig, ConfigError, ConfiguredModel};
 use crate::runtime::{Runtime, RuntimeError};
 
-struct AppState {
-    config_path: Option<PathBuf>,
-    runtime: tokio::sync::RwLock<Arc<Runtime>>,
+pub(crate) struct AppState {
+    pub(crate) config_path: Option<PathBuf>,
+    pub(crate) runtime: tokio::sync::RwLock<Arc<Runtime>>,
 }
 
 pub async fn app_from_config(cfg: AppConfig) -> Router {
@@ -44,6 +44,16 @@ pub async fn test_app() -> Router {
 pub async fn test_app_with_disabled() -> Router {
     let mut cfg = clinic_cfg();
     cfg.disabled.push(too_big());
+    app_from_config(cfg).await
+}
+
+pub async fn test_app_ws() -> Router {
+    let mut cfg = clinic_cfg();
+    for model in &mut cfg.enabled {
+        if model.spec.name == "whisper" {
+            model.transport = "websocket".into();
+        }
+    }
     app_from_config(cfg).await
 }
 
@@ -77,6 +87,7 @@ fn router(config_path: Option<PathBuf>, rt: Runtime) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/status", get(status))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/session", get(crate::ws::session))
         .route("/admin/reload", post(reload))
         .with_state(state_for(config_path, rt))
 }
@@ -307,6 +318,7 @@ fn chat_error(err: RuntimeError) -> StatusCode {
         RuntimeError::Unknown => StatusCode::NOT_FOUND,
         RuntimeError::Disabled | RuntimeError::TooLarge => StatusCode::BAD_REQUEST,
         RuntimeError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        RuntimeError::NoWebsocket => StatusCode::NOT_FOUND,
         RuntimeError::Engine(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

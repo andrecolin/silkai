@@ -1,6 +1,7 @@
 pub mod app;
 pub mod config;
 pub mod runtime;
+pub(crate) mod ws;
 
 mod serve;
 

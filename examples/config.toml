@@ -30,7 +30,9 @@ priority = "live"
 exclusive = false
 slots = 2
 keep_warm = true
-transport = "http"
+transport = "both"
+# transport = "websocket"  # session socket only
+# transport = "http"       # POST /v1/chat/completions only
 
 # Large writer: needs the GPU to itself (summaries, emails, long answers).
 [models.write]

@@ -309,8 +309,9 @@ another copy.
 | `exclusive` job (SOAP) | Starts only when **no `live` slots are held**. May evict idle models and preempt running `background` or `normal` (not `live`) so it can have the bench alone |
 | `background` | Only admitted if it fits beside current residents; first to evict |
 
-Whisper WebSocket **holds** a live slot until disconnect or `idle_timeout_secs`.
-Two doctors = two sockets = two slots on one Whisper.
+A WebSocket session **holds one slot** on that model until disconnect or
+`idle_timeout_secs`. Any model can use this (`transport = "websocket"` or
+`"both"`). Two concurrent sockets on `slots = 2` share one resident copy.
 
 If SOAP is generating and a doctor starts dictation: SOAP is **stopped between
 tokens**, requeued at the head of the SOAP queue, Whisper takes the bench.
@@ -386,17 +387,24 @@ Errors: unknown model `404`; model larger than GPU `400`; timeout `504`.
 
 ### WebSocket
 
-`GET /v1/audio/stream?model=whisper` upgrades to WebSocket.
+Any model with `transport = "websocket"` or `"both"` may be opened as a
+session. This is not Whisper-specific. HTTP remains available when
+`transport` is `"http"` or `"both"`.
 
-Protocol (text JSON control, binary audio):
+`GET /v1/session?model=<name>` upgrades to WebSocket.
 
-- Server → `{ "type": "queued" }` | `{ "type": "warming" }` | `{ "type": "live" }`
-- Client → binary PCM chunks (config default: 16 kHz s16le mono) or JSON `{ "type": "stop" }`
-- Server → `{ "type": "partial", "text": "..." }` / `{ "type": "final", "text": "..." }`
-- Idle: no audio for `idle_timeout_secs` → `{ "type": "idle_close" }` and close
+Protocol (JSON text frames):
 
-A live socket holds one slot. Heartbeat: client ping at least every 15 s or
-send audio.
+- Server → `{ "type": "queued" }` | `{ "type": "live" }` | `{ "type": "error", "message": "..." }`
+- Client → `{ "type": "prompt", "content": "..." }` | `{ "type": "stop" }`
+- Server → `{ "type": "token", "text": "..." }` then `{ "type": "done" }`
+- Idle: no client message for `idle_timeout_secs` (default 45) →
+  `{ "type": "idle_close" }` and close
+
+A live socket holds one scheduler slot until disconnect or idle close, so a
+high-priority model stays on the GPU between prompts. Binary audio frames for
+speech models can be added on the same route later; they do not get a separate
+Whisper-only endpoint.
 
 ### Binding
 
@@ -525,7 +533,8 @@ GPUs (layer/tensor split).
 3. **VRAM cost is per resident model, not per job.** Slots share one copy.
 4. **Async intake, possibly serial run.** Two SOAP POSTs do not mean two 28 GB
    copies.
-5. **WebSocket = lease on a live slot.** That is how dictation blocks SOAP.
+5. **WebSocket = lease on a slot for whichever model was requested.** Config
+   `transport` chooses HTTP, WebSocket, or both. Not Whisper-only.
 6. **Warm RAM copies, not CUDA VMM.** Portable; 128 GB RAM makes 1–3 s switches.
 7. **llama.cpp/whisper.cpp default, vLLM optional.** Portability over peak SOAP
    throughput on day one.

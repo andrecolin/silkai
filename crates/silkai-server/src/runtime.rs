@@ -21,6 +21,8 @@ pub enum RuntimeError {
     TooLarge,
     #[error("engine unavailable")]
     Unavailable,
+    #[error("websocket not enabled for model")]
+    NoWebsocket,
     #[error(transparent)]
     Engine(#[from] EngineError),
 }
@@ -42,6 +44,9 @@ struct Inner {
     apply_tx: mpsc::UnboundedSender<Vec<Action>>,
     apply_rx: Mutex<Option<mpsc::UnboundedReceiver<Vec<Action>>>>,
     request_timeout: Duration,
+    transports: HashMap<String, String>,
+    idle_timeouts: HashMap<String, Duration>,
+    sessions: Mutex<HashSet<JobId>>,
 }
 
 impl Inner {
@@ -59,6 +64,9 @@ impl Inner {
             apply_tx,
             apply_rx: Mutex::new(Some(apply_rx)),
             request_timeout: cfg.request_timeout,
+            transports: transports_for(&cfg.enabled),
+            idle_timeouts: idle_timeouts_for(&cfg.enabled),
+            sessions: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -90,6 +98,85 @@ impl Runtime {
 
     pub async fn finished(&self, job_id: JobId) {
         self.complete(job_id).await.expect("runtime finish actions");
+    }
+
+    pub fn allows_websocket(&self, model: &str) -> bool {
+        matches!(
+            self.inner
+                .transports
+                .get(model)
+                .map(|s| s.to_ascii_lowercase())
+                .as_deref(),
+            Some("websocket") | Some("both")
+        )
+    }
+
+    pub fn idle_timeout(&self, model: &str) -> Duration {
+        self.inner
+            .idle_timeouts
+            .get(model)
+            .copied()
+            .unwrap_or(Duration::from_secs(45))
+    }
+
+    pub async fn begin_session(&self, model: &str) -> Result<JobId, RuntimeError> {
+        self.ensure_enabled(model)?;
+        self.ensure_available(model)?;
+        if !self.allows_websocket(model) {
+            return Err(RuntimeError::NoWebsocket);
+        }
+        let mut sched = self.inner.scheduler.lock().await;
+        let (job_id, actions) = match sched.submit(model) {
+            SubmitResult::Accepted { job_id, actions } => (job_id, actions),
+            SubmitResult::Rejected { reason } => return Err(reject_err(reason)),
+        };
+        self.inner.sessions.lock().await.insert(job_id);
+        drop(sched);
+        self.apply_all(actions).await?;
+        let sched = self.inner.scheduler.lock().await;
+        self.record_status(&sched);
+        drop(sched);
+        self.wait_until_running(job_id).await?;
+        Ok(job_id)
+    }
+
+    pub async fn session_prompt(
+        &self,
+        job_id: JobId,
+        model: &str,
+        prompt: &str,
+    ) -> Result<mpsc::Receiver<String>, RuntimeError> {
+        if !self.inner.sessions.lock().await.contains(&job_id) {
+            return Err(RuntimeError::Unknown);
+        }
+        if let Some(old) = self.inner.cancels.lock().await.remove(&job_id) {
+            old.cancel();
+        }
+        let token = self.watch(job_id).await;
+        let engine = Arc::clone(self.engine(model)?);
+        engine.run(prompt, token).await.map_err(engine_err)
+    }
+
+    async fn wait_until_running(&self, job_id: JobId) -> Result<(), RuntimeError> {
+        let deadline = tokio::time::Instant::now() + self.inner.request_timeout;
+        loop {
+            {
+                let sched = self.inner.scheduler.lock().await;
+                if sched.job_running(job_id) {
+                    return Ok(());
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                self.end_session(job_id).await;
+                return Err(RuntimeError::Unavailable);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    pub async fn end_session(&self, job_id: JobId) {
+        self.inner.sessions.lock().await.remove(&job_id);
+        self.drop_job(job_id).await;
     }
 
     pub async fn drop_job(&self, job_id: JobId) {
@@ -413,6 +500,23 @@ fn arc_engine(model: &ConfiguredModel) -> Option<Arc<dyn Engine>> {
 
 fn known_engine(engine: &str) -> bool {
     matches!(engine, "fake" | "llama.cpp")
+}
+
+fn transports_for(models: &[ConfiguredModel]) -> HashMap<String, String> {
+    models
+        .iter()
+        .map(|m| (m.spec.name.clone(), m.transport.clone()))
+        .collect()
+}
+
+fn idle_timeouts_for(models: &[ConfiguredModel]) -> HashMap<String, Duration> {
+    models
+        .iter()
+        .filter_map(|m| {
+            m.idle_timeout_secs
+                .map(|s| (m.spec.name.clone(), Duration::from_secs(s)))
+        })
+        .collect()
 }
 
 fn llama_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {

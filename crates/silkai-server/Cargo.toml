@@ -10,7 +10,7 @@ llama = ["silkai-adapters/llama"]
 
 [dependencies]
 anyhow = "1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -23,5 +23,7 @@ toml = "0.8"
 tower = "0.5"
 
 [dev-dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tempfile = "3"
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect"] }

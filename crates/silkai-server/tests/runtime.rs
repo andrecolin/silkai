@@ -130,3 +130,54 @@ async fn stream_end_then_live_submit_does_not_panic() {
     rt.finished(soap_job).await; // must not panic; should be idempotent
     rt.finished(w_job).await; // must not panic
 }
+
+fn ws_whisper_cfg() -> AppConfig {
+    let mut cfg = clinic_cfg();
+    for model in &mut cfg.enabled {
+        if model.spec.name == "whisper" {
+            model.transport = "websocket".into();
+        }
+    }
+    cfg
+}
+
+#[tokio::test]
+async fn http_transport_rejects_websocket_session() {
+    let rt = Runtime::new(clinic_cfg()).await.unwrap();
+    let err = rt.begin_session("soap").await.unwrap_err();
+    assert!(matches!(err, RuntimeError::NoWebsocket));
+}
+
+#[tokio::test]
+async fn websocket_session_holds_slot_until_end() {
+    let rt = Runtime::new(ws_whisper_cfg()).await.unwrap();
+    let job = rt.begin_session("whisper").await.unwrap();
+    let whisper = rt
+        .status()
+        .models
+        .into_iter()
+        .find(|m| m.name == "whisper")
+        .unwrap();
+    assert_eq!(whisper.running, 1);
+    let mut rx = rt.session_prompt(job, "whisper", "hello").await.unwrap();
+    let mut out = String::new();
+    while let Some(t) = rx.recv().await {
+        out.push_str(&t);
+    }
+    assert_eq!(out, "hello world");
+    let still = rt
+        .status()
+        .models
+        .into_iter()
+        .find(|m| m.name == "whisper")
+        .unwrap();
+    assert_eq!(still.running, 1);
+    rt.end_session(job).await;
+    let after = rt
+        .status()
+        .models
+        .into_iter()
+        .find(|m| m.name == "whisper")
+        .unwrap();
+    assert_eq!(after.running, 0);
+}

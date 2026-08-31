@@ -59,10 +59,13 @@ Slice 1 is a working **Linux** daemon (`127.0.0.1` only): scheduler, HTTP chat
 completions, fake engines (no GPU required), optional llama.cpp behind
 `--features llama`.
 
-Still to come: live speech-to-text over WebSocket (an open connection keeps
-that model high-priority), more adapters, and easier install. The scheduler
-and HTTP API are meant to stay portable (x86_64 and ARM; CUDA / Vulkan / Metal
-via the engine, not the core).
+WebSocket is a **per-model** option (`transport = "websocket"` or `"both"`),
+not tied to speech-to-text. An open session holds that model’s slot until the
+socket closes or goes idle.
+
+Still to come: binary audio on the same session route, more adapters, and
+easier install. The scheduler and HTTP API are meant to stay portable (x86_64
+and ARM; CUDA / Vulkan / Metal via the engine, not the core).
 
 ## Run
 
@@ -86,6 +89,11 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 Streaming: `"stream": true` (SSE). Also `GET /v1/models` and `GET /v1/status`.
+
+Any model with `transport = "websocket"` or `"both"` can hold a slot over a
+socket (`GET /v1/session?model=transcribe`). Send
+`{"type":"prompt","content":"..."}`. The connection keeps that model on the GPU
+until you disconnect or it goes idle.
 
 See `examples/config.toml` for VRAM, `priority` (`live` | `normal` | `background`),
 `exclusive`, `slots`, and `keep_warm`.

@@ -86,6 +86,10 @@ impl Scheduler {
         self.queue.iter().filter(|(_, name)| name == model).count() as u32
     }
 
+    pub fn job_running(&self, job_id: JobId) -> bool {
+        self.jobs.contains_key(&job_id)
+    }
+
     pub fn status(&self) -> StatusSnapshot {
         StatusSnapshot {
             models: self.model_statuses(),
