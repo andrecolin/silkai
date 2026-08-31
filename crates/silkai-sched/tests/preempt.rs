@@ -146,3 +146,33 @@ fn later_soap_submit_does_not_jump_queued_soap() {
     assert_eq!(s.running("soap"), 1);
     assert_eq!(s.queued("soap"), 1);
 }
+
+#[test]
+fn two_queued_soap_notes_keep_resident_copy() {
+    let mut s = sched();
+    let w = job_id(s.submit("whisper"));
+    let _scan = job_id(s.submit("chart-scan"));
+    let soap_a = job_id(s.submit("soap"));
+    let soap_b = job_id(s.submit("soap"));
+    let after_w = s.finish(w);
+    assert!(after_w.iter().any(|a| matches!(
+        a,
+        Action::Start { model, job_id, .. } if model == "soap" && *job_id == soap_a
+    )));
+    let after_a = s.finish(soap_a);
+    assert!(after_a.iter().any(|a| matches!(
+        a,
+        Action::Start { model, job_id, .. } if model == "soap" && *job_id == soap_b
+    )));
+    assert!(!after_a.iter().any(|a| matches!(
+        a,
+        Action::Load { model } | Action::Wake { model } | Action::Sleep { model }
+        if model == "soap" || model == "chart-scan"
+    )));
+    assert!(!after_a
+        .iter()
+        .any(|a| matches!(a, Action::Start { model, .. } if model == "chart-scan")));
+    assert!(!after_a.iter().any(|a| matches!(a, Action::Preempt { .. })));
+    assert_eq!(s.tier("soap"), Tier::Bench);
+    assert_eq!(s.running("soap"), 1);
+}

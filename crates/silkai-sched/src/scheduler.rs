@@ -303,7 +303,7 @@ impl Scheduler {
 
     fn exclusive_idle_plan(&self, spec: &ModelSpec) -> Option<Vec<String>> {
         let others = self.bench_names_except(&spec.name);
-        if others.iter().any(|n| self.running(n) > 0) {
+        if others.iter().any(|n| !self.is_idle(n)) {
             return None;
         }
         if !self.fits_after(&others, spec) {
@@ -404,10 +404,14 @@ impl Scheduler {
             .collect()
     }
 
+    fn is_idle(&self, name: &str) -> bool {
+        self.running(name) == 0 && self.queued(name) == 0
+    }
+
     fn idle_bench_except(&self, model: &str) -> Vec<String> {
         self.bench_names_except(model)
             .into_iter()
-            .filter(|n| self.running(n) == 0)
+            .filter(|n| self.is_idle(n))
             .collect()
     }
 
