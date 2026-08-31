@@ -17,9 +17,44 @@ pub enum Tier {
 pub struct JobId(pub u64);
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct GpuBudget {
+    pub id: u32,
+    pub schedulable_gb: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Resources {
     pub gpu_schedulable_gb: f64,
     pub ram_shelf_gb: f64,
+    pub gpus: Vec<GpuBudget>,
+}
+
+impl Resources {
+    pub fn single(gpu_schedulable_gb: f64, ram_shelf_gb: f64) -> Self {
+        Self {
+            gpu_schedulable_gb,
+            ram_shelf_gb,
+            gpus: Vec::new(),
+        }
+    }
+
+    pub fn benches(&self) -> Vec<GpuBudget> {
+        if self.gpus.is_empty() {
+            vec![GpuBudget {
+                id: 0,
+                schedulable_gb: self.gpu_schedulable_gb,
+            }]
+        } else {
+            self.gpus.clone()
+        }
+    }
+
+    pub fn max_schedulable(&self) -> f64 {
+        self.benches()
+            .iter()
+            .map(|g| g.schedulable_gb)
+            .fold(0.0, f64::max)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +66,7 @@ pub struct ModelSpec {
     pub exclusive: bool,
     pub slots: u32,
     pub keep_warm: bool,
+    pub gpu: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +98,7 @@ pub struct ModelStatus {
     pub tier: Tier,
     pub running: u32,
     pub queued: u32,
+    pub gpu: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]

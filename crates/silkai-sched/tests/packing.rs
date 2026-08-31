@@ -62,6 +62,7 @@ fn model_bigger_than_gpu_is_rejected() {
             exclusive: true,
             slots: 1,
             keep_warm: true,
+            gpu: None,
         }],
     )
     .unwrap();

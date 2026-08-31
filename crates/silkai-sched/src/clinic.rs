@@ -1,10 +1,7 @@
 use crate::types::{ModelSpec, Priority, Resources};
 
 pub fn clinic_resources() -> Resources {
-    Resources {
-        gpu_schedulable_gb: 29.0,
-        ram_shelf_gb: 96.0,
-    }
+    Resources::single(29.0, 96.0)
 }
 
 pub fn clinic_models() -> Vec<ModelSpec> {
@@ -17,6 +14,7 @@ pub fn clinic_models() -> Vec<ModelSpec> {
             exclusive: false,
             slots: 2,
             keep_warm: true,
+            gpu: None,
         },
         ModelSpec {
             name: "soap".into(),
@@ -26,6 +24,7 @@ pub fn clinic_models() -> Vec<ModelSpec> {
             exclusive: true,
             slots: 1,
             keep_warm: true,
+            gpu: None,
         },
         ModelSpec {
             name: "chart-scan".into(),
@@ -35,6 +34,7 @@ pub fn clinic_models() -> Vec<ModelSpec> {
             exclusive: false,
             slots: 1,
             keep_warm: true,
+            gpu: None,
         },
     ]
 }

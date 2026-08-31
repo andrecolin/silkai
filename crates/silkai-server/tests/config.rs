@@ -65,6 +65,47 @@ fn invalid_toml_errors() {
 }
 
 #[test]
+fn parses_two_gpus_and_pin() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+
+[resources]
+ram_total_gb = 128
+ram_headroom_gb = 32
+
+[[resources.gpus]]
+id = 0
+total_gb = 32
+headroom_gb = 3
+
+[[resources.gpus]]
+id = 1
+total_gb = 32
+headroom_gb = 3
+
+[models.write]
+engine = "fake"
+path = "/models/write.gguf"
+vram_gb = 26
+priority = "normal"
+exclusive = true
+
+[models.index]
+engine = "fake"
+path = "/models/index.gguf"
+vram_gb = 10
+priority = "background"
+gpu = 1
+"#;
+    let cfg = load_from_str(t).unwrap();
+    assert_eq!(cfg.resources.gpus.len(), 2);
+    assert_eq!(cfg.resources.max_schedulable(), 29.0);
+    let index = cfg.enabled.iter().find(|m| m.spec.name == "index").unwrap();
+    assert_eq!(index.spec.gpu, Some(1));
+    assert!(cfg.enabled.iter().any(|m| m.spec.name == "write"));
+}
+
+#[test]
 fn missing_gpu_total_errors() {
     let t = r#"
 listen = "127.0.0.1:8080"

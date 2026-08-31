@@ -10,6 +10,15 @@ ram_total_gb = 128
 ram_headroom_gb = 32
 prefetch_on_start = true
 request_timeout_secs = 600
+# Two cards: each is its own bench; RAM is still one shelf.
+# [[resources.gpus]]
+# id = 0
+# total_gb = 32
+# headroom_gb = 3
+# [[resources.gpus]]
+# id = 1
+# total_gb = 32
+# headroom_gb = 3
 
 # Live speech-to-text: two people can share this copy.
 [models.transcribe]

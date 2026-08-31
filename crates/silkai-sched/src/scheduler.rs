@@ -18,6 +18,7 @@ pub struct Scheduler {
     tiers: HashMap<String, Tier>,
     running: HashMap<String, u32>,
     jobs: HashMap<JobId, String>,
+    on_gpu: HashMap<String, u32>,
     queue: VecDeque<(JobId, String)>,
     idle_since: HashMap<String, u64>,
     idle_tick: u64,
@@ -39,6 +40,7 @@ impl Scheduler {
             tiers,
             running,
             jobs: HashMap::new(),
+            on_gpu: HashMap::new(),
             queue: VecDeque::new(),
             idle_since: HashMap::new(),
             idle_tick: 0,
@@ -108,14 +110,23 @@ impl Scheduler {
             tier: self.tier(name),
             running: self.running(name),
             queued: self.queued(name),
+            gpu: if self.tier(name) == Tier::Bench {
+                self.gpu_of(name)
+            } else {
+                None
+            },
         }
+    }
+
+    pub fn gpu_of(&self, model: &str) -> Option<u32> {
+        self.on_gpu.get(model).copied()
     }
 
     pub fn submit(&mut self, model: &str) -> SubmitResult {
         let Some(spec) = self.models.get(model).cloned() else {
             return rejected(RejectReason::UnknownModel);
         };
-        if spec.vram_gb > self.resources.gpu_schedulable_gb {
+        if spec.vram_gb > self.max_for(&spec) {
             return rejected(RejectReason::TooLarge);
         }
         let job_id = self.alloc_id();
@@ -192,26 +203,36 @@ impl Scheduler {
     }
 
     fn preempt_and_place(&mut self, job_id: JobId, spec: &ModelSpec) -> Option<Vec<Action>> {
-        if !self.should_preempt(spec) {
-            return None;
+        for gpu in self.candidate_gpus(spec) {
+            if !self.should_preempt_on(gpu.id, spec) {
+                continue;
+            }
+            let victims = self.preempt_victim_models_on(gpu.id, &spec.name);
+            if victims.is_empty() {
+                continue;
+            }
+            let mut actions = self.preempt_models(&victims);
+            if let Some(rest) = self.try_place(job_id, spec) {
+                actions.extend(rest);
+                return Some(actions);
+            }
         }
-        let victims = self.preempt_victim_models(&spec.name);
-        let mut actions = self.preempt_models(&victims);
-        actions.extend(self.try_place(job_id, spec)?);
-        Some(actions)
+        None
     }
 
-    fn should_preempt(&self, spec: &ModelSpec) -> bool {
-        self.may_preempt(spec)
-            && !self.preempt_victim_models(&spec.name).is_empty()
-            && self.can_place_after_preempt(spec)
+    fn should_preempt_on(&self, gpu: u32, spec: &ModelSpec) -> bool {
+        self.may_preempt_on(gpu, spec)
+            && !self.preempt_victim_models_on(gpu, &spec.name).is_empty()
+            && self.can_place_after_preempt_on(gpu, spec)
     }
 
-    fn may_preempt(&self, spec: &ModelSpec) -> bool {
+    fn may_preempt_on(&self, gpu: u32, spec: &ModelSpec) -> bool {
         match spec.priority {
             Priority::Live => self.has_slot(spec),
             Priority::Background => false,
-            Priority::Normal => spec.exclusive && !self.has_running_live() && self.has_slot(spec),
+            Priority::Normal => {
+                spec.exclusive && !self.has_running_live_on(gpu) && self.has_slot(spec)
+            }
         }
     }
 
@@ -219,14 +240,16 @@ impl Scheduler {
         self.tier(&spec.name) != Tier::Bench || self.running(&spec.name) < spec.slots
     }
 
-    fn has_running_live(&self) -> bool {
-        self.models
-            .values()
-            .any(|m| m.priority == Priority::Live && self.running(&m.name) > 0)
+    fn has_running_live_on(&self, gpu: u32) -> bool {
+        self.models.values().any(|m| {
+            m.priority == Priority::Live
+                && self.running(&m.name) > 0
+                && self.gpu_of(&m.name) == Some(gpu)
+        })
     }
 
-    fn can_place_after_preempt(&self, spec: &ModelSpec) -> bool {
-        let stuck = self.immovable_bench(&spec.name);
+    fn can_place_after_preempt_on(&self, gpu: u32, spec: &ModelSpec) -> bool {
+        let stuck = self.immovable_on(gpu, &spec.name);
         if spec.exclusive && !stuck.is_empty() {
             return false;
         }
@@ -234,7 +257,7 @@ impl Scheduler {
             return false;
         }
         let used: f64 = stuck.iter().map(|n| self.vram_gb(n)).sum();
-        used + self.added_vram(spec) <= self.resources.gpu_schedulable_gb
+        used + self.added_vram(spec) <= self.schedulable(gpu)
     }
 
     fn added_vram(&self, spec: &ModelSpec) -> f64 {
@@ -245,16 +268,16 @@ impl Scheduler {
         }
     }
 
-    fn immovable_bench(&self, incoming: &str) -> Vec<String> {
-        self.bench_names_except(incoming)
+    fn immovable_on(&self, gpu: u32, incoming: &str) -> Vec<String> {
+        self.bench_on(gpu, incoming)
             .into_iter()
             .filter(|n| self.running(n) > 0 && self.priority_of(n) == Priority::Live)
             .collect()
     }
 
-    fn preempt_victim_models(&self, incoming: &str) -> Vec<String> {
+    fn preempt_victim_models_on(&self, gpu: u32, incoming: &str) -> Vec<String> {
         let mut names: Vec<String> = self
-            .bench_names_except(incoming)
+            .bench_on(gpu, incoming)
             .into_iter()
             .filter(|n| self.running(n) > 0 && self.priority_of(n) != Priority::Live)
             .collect();
@@ -311,10 +334,17 @@ impl Scheduler {
         if self.tier(&spec.name) == Tier::Bench {
             return self.start_if_slot_free(job_id, spec);
         }
-        let victims = self.idle_eviction_plan(spec)?;
-        let mut actions = self.evict_idle(&victims);
-        actions.extend(self.bring_to_bench_and_start(job_id, spec));
-        Some(actions)
+        for gpu in self.candidate_gpus(spec) {
+            if spec.vram_gb > gpu.schedulable_gb {
+                continue;
+            }
+            if let Some(victims) = self.idle_eviction_plan_on(gpu.id, spec) {
+                let mut actions = self.evict_idle(&victims);
+                actions.extend(self.bring_to_bench_and_start(job_id, spec, gpu.id));
+                return Some(actions);
+            }
+        }
+        None
     }
 
     fn start_if_slot_free(&mut self, job_id: JobId, spec: &ModelSpec) -> Option<Vec<Action>> {
@@ -325,17 +355,23 @@ impl Scheduler {
         Some(vec![start_action(job_id, &spec.name)])
     }
 
-    fn bring_to_bench_and_start(&mut self, job_id: JobId, spec: &ModelSpec) -> Vec<Action> {
+    fn bring_to_bench_and_start(
+        &mut self,
+        job_id: JobId,
+        spec: &ModelSpec,
+        gpu: u32,
+    ) -> Vec<Action> {
         let mut actions = self.demote_for_ram(spec);
-        actions.push(self.place_on_bench(spec));
+        actions.push(self.place_on_bench(spec, gpu));
         self.mark_running(job_id, spec);
         actions.push(start_action(job_id, &spec.name));
         actions
     }
 
-    fn place_on_bench(&mut self, spec: &ModelSpec) -> Action {
+    fn place_on_bench(&mut self, spec: &ModelSpec, gpu: u32) -> Action {
         let from = self.tier(&spec.name);
         self.tiers.insert(spec.name.clone(), Tier::Bench);
+        self.on_gpu.insert(spec.name.clone(), gpu);
         match from {
             Tier::Shelf => Action::Wake {
                 model: spec.name.clone(),
@@ -346,50 +382,51 @@ impl Scheduler {
         }
     }
 
-    fn idle_eviction_plan(&self, spec: &ModelSpec) -> Option<Vec<String>> {
-        if self.can_place(spec) {
+    fn idle_eviction_plan_on(&self, gpu: u32, spec: &ModelSpec) -> Option<Vec<String>> {
+        if self.can_place_on(gpu, spec) {
             return Some(Vec::new());
         }
         if spec.exclusive {
-            self.exclusive_idle_plan(spec)
+            self.exclusive_idle_plan_on(gpu, spec)
         } else {
-            self.share_idle_plan(spec)
+            self.share_idle_plan_on(gpu, spec)
         }
     }
 
-    fn exclusive_idle_plan(&self, spec: &ModelSpec) -> Option<Vec<String>> {
-        let others = self.bench_names_except(&spec.name);
+    fn exclusive_idle_plan_on(&self, gpu: u32, spec: &ModelSpec) -> Option<Vec<String>> {
+        let others = self.bench_on(gpu, &spec.name);
         if others.iter().any(|n| !self.is_idle(n)) {
             return None;
         }
-        if !self.fits_after(&others, spec) {
+        if !self.fits_after_on(gpu, &others, spec) {
             return None;
         }
         Some(self.sorted_idle(others))
     }
 
-    fn share_idle_plan(&self, spec: &ModelSpec) -> Option<Vec<String>> {
-        if self.has_running_exclusive_other(&spec.name) {
+    fn share_idle_plan_on(&self, gpu: u32, spec: &ModelSpec) -> Option<Vec<String>> {
+        if self.has_running_exclusive_on(gpu, &spec.name) {
             return None;
         }
-        let evict = self.idle_exclusives_except(&spec.name);
-        if self.can_place_after(&evict, spec) {
+        let evict = self.idle_exclusives_on(gpu, &spec.name);
+        if self.can_place_after_on(gpu, &evict, spec) {
             return Some(self.sorted_idle(evict));
         }
-        self.extend_idle_until_fit(spec, evict)
+        self.extend_idle_until_fit_on(gpu, spec, evict)
     }
 
-    fn extend_idle_until_fit(
+    fn extend_idle_until_fit_on(
         &self,
+        gpu: u32,
         spec: &ModelSpec,
         mut evict: Vec<String>,
     ) -> Option<Vec<String>> {
-        for victim in self.sorted_idle(self.idle_bench_except(&spec.name)) {
+        for victim in self.sorted_idle(self.idle_bench_on(gpu, &spec.name)) {
             if evict.contains(&victim) {
                 continue;
             }
             evict.push(victim);
-            if self.can_place_after(&evict, spec) {
+            if self.can_place_after_on(gpu, &evict, spec) {
                 return Some(self.sorted_idle(evict));
             }
         }
@@ -401,6 +438,7 @@ impl Scheduler {
     }
 
     fn sleep_or_discard(&mut self, name: &str) -> Action {
+        self.on_gpu.remove(name);
         if self.is_keep_warm(name) {
             self.tiers.insert(name.to_string(), Tier::Shelf);
             self.stamp_idle(name);
@@ -497,25 +535,25 @@ impl Scheduler {
         self.models.get(name).map(|m| m.keep_warm).unwrap_or(false)
     }
 
-    fn can_place(&self, spec: &ModelSpec) -> bool {
-        self.exclusive_ok(spec) && self.fits(spec)
+    fn can_place_on(&self, gpu: u32, spec: &ModelSpec) -> bool {
+        self.exclusive_ok_on(gpu, spec) && self.fits_on(gpu, spec)
     }
 
-    fn can_place_after(&self, evict: &[String], spec: &ModelSpec) -> bool {
-        self.exclusive_ok_after(evict, spec) && self.fits_after(evict, spec)
+    fn can_place_after_on(&self, gpu: u32, evict: &[String], spec: &ModelSpec) -> bool {
+        self.exclusive_ok_after_on(gpu, evict, spec) && self.fits_after_on(gpu, evict, spec)
     }
 
-    fn exclusive_ok(&self, spec: &ModelSpec) -> bool {
-        let others = self.bench_except(&spec.name);
+    fn exclusive_ok_on(&self, gpu: u32, spec: &ModelSpec) -> bool {
+        let others = self.bench_on(gpu, &spec.name);
         if spec.exclusive {
             return others.is_empty();
         }
         others.iter().all(|name| !self.is_exclusive(name))
     }
 
-    fn exclusive_ok_after(&self, evict: &[String], spec: &ModelSpec) -> bool {
-        let others: Vec<&str> = self
-            .bench_except(&spec.name)
+    fn exclusive_ok_after_on(&self, gpu: u32, evict: &[String], spec: &ModelSpec) -> bool {
+        let others: Vec<String> = self
+            .bench_on(gpu, &spec.name)
             .into_iter()
             .filter(|n| !evict.iter().any(|e| e == n))
             .collect();
@@ -526,18 +564,15 @@ impl Scheduler {
         }
     }
 
-    fn bench_except(&self, model: &str) -> Vec<&str> {
-        self.tiers
-            .iter()
-            .filter(|(name, tier)| **tier == Tier::Bench && *name != model)
-            .map(|(name, _)| name.as_str())
-            .collect()
-    }
-
-    fn bench_names_except(&self, model: &str) -> Vec<String> {
-        self.bench_except(model)
-            .into_iter()
-            .map(|n| n.to_string())
+    fn bench_on(&self, gpu: u32, except: &str) -> Vec<String> {
+        self.models
+            .keys()
+            .filter(|name| {
+                *name != except
+                    && self.tier(name) == Tier::Bench
+                    && self.gpu_of(name) == Some(gpu)
+            })
+            .cloned()
             .collect()
     }
 
@@ -545,24 +580,56 @@ impl Scheduler {
         self.running(name) == 0 && self.queued(name) == 0
     }
 
-    fn idle_bench_except(&self, model: &str) -> Vec<String> {
-        self.bench_names_except(model)
+    fn idle_bench_on(&self, gpu: u32, model: &str) -> Vec<String> {
+        self.bench_on(gpu, model)
             .into_iter()
             .filter(|n| self.is_idle(n))
             .collect()
     }
 
-    fn idle_exclusives_except(&self, model: &str) -> Vec<String> {
-        self.idle_bench_except(model)
+    fn idle_exclusives_on(&self, gpu: u32, model: &str) -> Vec<String> {
+        self.idle_bench_on(gpu, model)
             .into_iter()
             .filter(|n| self.is_exclusive(n))
             .collect()
     }
 
-    fn has_running_exclusive_other(&self, model: &str) -> bool {
-        self.bench_except(model)
+    fn has_running_exclusive_on(&self, gpu: u32, model: &str) -> bool {
+        self.bench_on(gpu, model)
             .iter()
             .any(|n| self.is_exclusive(n) && self.running(n) > 0)
+    }
+
+    fn candidate_gpus(&self, spec: &ModelSpec) -> Vec<crate::GpuBudget> {
+        let all = self.resources.benches();
+        match spec.gpu {
+            Some(id) => all.into_iter().filter(|g| g.id == id).collect(),
+            None => all,
+        }
+    }
+
+    fn max_for(&self, spec: &ModelSpec) -> f64 {
+        self.candidate_gpus(spec)
+            .iter()
+            .map(|g| g.schedulable_gb)
+            .fold(0.0, f64::max)
+    }
+
+    fn schedulable(&self, gpu: u32) -> f64 {
+        self.resources
+            .benches()
+            .into_iter()
+            .find(|g| g.id == gpu)
+            .map(|g| g.schedulable_gb)
+            .unwrap_or(0.0)
+    }
+
+    fn gpu_used_on(&self, gpu: u32) -> f64 {
+        self.models
+            .values()
+            .filter(|m| self.tier(&m.name) == Tier::Bench && self.gpu_of(&m.name) == Some(gpu))
+            .map(|m| m.vram_gb)
+            .sum()
     }
 
     fn sorted_idle(&self, mut names: Vec<String>) -> Vec<String> {
@@ -590,13 +657,13 @@ impl Scheduler {
         self.models.get(name).map(|m| m.exclusive).unwrap_or(false)
     }
 
-    fn fits(&self, spec: &ModelSpec) -> bool {
-        self.gpu_used_gb() + spec.vram_gb <= self.resources.gpu_schedulable_gb
+    fn fits_on(&self, gpu: u32, spec: &ModelSpec) -> bool {
+        self.gpu_used_on(gpu) + spec.vram_gb <= self.schedulable(gpu)
     }
 
-    fn fits_after(&self, evict: &[String], spec: &ModelSpec) -> bool {
+    fn fits_after_on(&self, gpu: u32, evict: &[String], spec: &ModelSpec) -> bool {
         let freed: f64 = evict.iter().map(|n| self.vram_gb(n)).sum();
-        self.gpu_used_gb() - freed + spec.vram_gb <= self.resources.gpu_schedulable_gb
+        self.gpu_used_on(gpu) - freed + spec.vram_gb <= self.schedulable(gpu)
     }
 
     fn vram_gb(&self, name: &str) -> f64 {

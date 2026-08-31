@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde::Deserialize;
-use silkai_sched::{ModelSpec, Priority, Resources};
+use silkai_sched::{GpuBudget, ModelSpec, Priority, Resources};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
@@ -46,7 +46,7 @@ struct FileConfig {
 
 #[derive(Deserialize)]
 struct FileResources {
-    gpu_total_gb: f64,
+    gpu_total_gb: Option<f64>,
     #[serde(default)]
     gpu_headroom_gb: f64,
     ram_total_gb: f64,
@@ -56,6 +56,16 @@ struct FileResources {
     prefetch_on_start: bool,
     #[serde(default = "default_timeout")]
     request_timeout_secs: u64,
+    #[serde(default)]
+    gpus: Vec<FileGpu>,
+}
+
+#[derive(Deserialize)]
+struct FileGpu {
+    id: u32,
+    total_gb: f64,
+    #[serde(default)]
+    headroom_gb: f64,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +84,8 @@ struct FileModel {
     #[serde(default = "default_transport")]
     transport: String,
     idle_timeout_secs: Option<u64>,
+    #[serde(default)]
+    gpu: Option<u32>,
 }
 
 pub fn load_from_str(s: &str) -> Result<AppConfig, ConfigError> {
@@ -86,8 +98,8 @@ pub fn load_from_path(path: impl AsRef<Path>) -> Result<AppConfig, ConfigError> 
 }
 
 fn app_config(file: FileConfig) -> Result<AppConfig, ConfigError> {
-    let resources = sched_resources(&file.resources);
-    let (enabled, disabled) = split_models(file.models, resources.gpu_schedulable_gb)?;
+    let resources = sched_resources(&file.resources)?;
+    let (enabled, disabled) = split_models(file.models, resources.max_schedulable())?;
     Ok(AppConfig {
         listen: file.listen,
         prefetch_on_start: file.resources.prefetch_on_start,
@@ -99,11 +111,30 @@ fn app_config(file: FileConfig) -> Result<AppConfig, ConfigError> {
     })
 }
 
-fn sched_resources(r: &FileResources) -> Resources {
-    Resources {
-        gpu_schedulable_gb: r.gpu_total_gb - r.gpu_headroom_gb,
-        ram_shelf_gb: r.ram_total_gb - r.ram_headroom_gb,
+fn sched_resources(r: &FileResources) -> Result<Resources, ConfigError> {
+    let ram_shelf_gb = r.ram_total_gb - r.ram_headroom_gb;
+    if !r.gpus.is_empty() {
+        let gpus: Vec<GpuBudget> = r
+            .gpus
+            .iter()
+            .map(|g| GpuBudget {
+                id: g.id,
+                schedulable_gb: g.total_gb - g.headroom_gb,
+            })
+            .collect();
+        let gpu_schedulable_gb = gpus.iter().map(|g| g.schedulable_gb).fold(0.0, f64::max);
+        return Ok(Resources {
+            gpu_schedulable_gb,
+            ram_shelf_gb,
+            gpus,
+        });
     }
+    let Some(total) = r.gpu_total_gb else {
+        return Err(ConfigError::Invalid(
+            "resources.gpu_total_gb or resources.gpus is required".into(),
+        ));
+    };
+    Ok(Resources::single(total - r.gpu_headroom_gb, ram_shelf_gb))
 }
 
 fn split_models(
@@ -133,6 +164,7 @@ fn configured_model(name: String, m: FileModel) -> Result<ConfiguredModel, Confi
             exclusive: m.exclusive,
             slots: m.slots,
             keep_warm: m.keep_warm,
+            gpu: m.gpu,
         },
         engine: m.engine,
         path: m.path,

@@ -41,6 +41,7 @@ fn too_big() -> ConfiguredModel {
             exclusive: true,
             slots: 1,
             keep_warm: true,
+            gpu: None,
         },
     }
 }

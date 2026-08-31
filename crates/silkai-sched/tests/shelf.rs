@@ -42,10 +42,7 @@ fn second_run_wakes_from_shelf_not_load() {
 
 #[test]
 fn ram_pressure_discards_lru_shelf() {
-    let res = Resources {
-        gpu_schedulable_gb: 29.0,
-        ram_shelf_gb: 30.0,
-    };
+    let res = Resources::single(29.0, 30.0);
     let mut s = Scheduler::new(res, clinic_models()).unwrap();
     let actions = s.prefetch();
     assert!(s.ram_used_gb() <= 30.0 + 1e-6);
@@ -68,6 +65,7 @@ fn keep_warm_false_goes_cupboard_on_evict() {
             exclusive: false,
             slots: 1,
             keep_warm: false,
+            gpu: None,
         },
         ModelSpec {
             name: "big".into(),
@@ -77,6 +75,7 @@ fn keep_warm_false_goes_cupboard_on_evict() {
             exclusive: true,
             slots: 1,
             keep_warm: true,
+            gpu: None,
         },
     ];
     let mut s = Scheduler::new(clinic_resources(), models).unwrap();

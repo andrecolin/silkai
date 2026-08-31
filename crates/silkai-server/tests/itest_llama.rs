@@ -50,10 +50,10 @@ fn env_f64(key: &str, default: f64) -> f64 {
 
 #[cfg(feature = "llama")]
 fn resources_for(vram_a: f64, vram_b: f64) -> silkai_sched::Resources {
-    silkai_sched::Resources {
-        gpu_schedulable_gb: 29.0_f64.max(vram_a.max(vram_b) + 1.0),
-        ram_shelf_gb: 96.0_f64.max(vram_a + vram_b + 8.0),
-    }
+    silkai_sched::Resources::single(
+        29.0_f64.max(vram_a.max(vram_b) + 1.0),
+        96.0_f64.max(vram_a + vram_b + 8.0),
+    )
 }
 
 #[cfg(feature = "llama")]
@@ -95,6 +95,7 @@ fn llama_model(
             exclusive,
             slots: 1,
             keep_warm: true,
+            gpu: None,
         },
         engine: "llama.cpp".into(),
         path,

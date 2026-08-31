@@ -7,8 +7,8 @@ right now. A little VRAM is left over for normal machine functions.
 Several GPUs are several benches and the same RAM shelf. An ~80% model and an
 ~30% model run at the same time if they sit on **different** cards. On one
 card they still do not fit. **Exclusive** means that card is alone, not the
-whole machine. Slice 1 schedules one GPU; multi-GPU packing is a required
-next step.
+whole machine. List cards under `[[resources.gpus]]` and optionally pin a
+model with `gpu = 1`.
 
 ![128 GB RAM keeps three models warm; the 32 GB GPU holds only the model that is working, plus a small slice for the desktop](docs/silkai-memory.svg)
 
@@ -60,10 +60,10 @@ completions, fake engines (no GPU required), optional llama.cpp behind
 `--features llama`.
 
 Still to come: live speech-to-text over WebSocket (an open connection keeps
-that model high-priority), **multi-GPU packing** (one model per card, 80% + 30%
-on two devices), more adapters, and easier install. The scheduler and HTTP API
-are meant to stay portable (x86_64 and ARM; CUDA / Vulkan / Metal via the
-engine, not the core).
+that model high-priority), pointing llama.cpp at a specific CUDA device,
+more adapters, and easier install. The scheduler and HTTP API are meant to
+stay portable (x86_64 and ARM; CUDA / Vulkan / Metal via the engine, not the
+core).
 
 ## Run
 
