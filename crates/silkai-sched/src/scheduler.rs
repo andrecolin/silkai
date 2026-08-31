@@ -53,6 +53,24 @@ impl Scheduler {
             .sum()
     }
 
+    pub fn ram_used_gb(&self) -> f64 {
+        self.models
+            .values()
+            .filter(|m| self.holds_ram(&m.name))
+            .map(|m| m.ram_gb)
+            .sum()
+    }
+
+    pub fn prefetch(&mut self) -> Vec<Action> {
+        let mut actions = Vec::new();
+        for name in self.prefetch_candidates() {
+            if let Some(action) = self.warm_if_fits(&name) {
+                actions.push(action);
+            }
+        }
+        actions
+    }
+
     pub fn tier(&self, model: &str) -> Tier {
         self.tiers.get(model).copied().unwrap_or(Tier::Cupboard)
     }
@@ -272,9 +290,11 @@ impl Scheduler {
     }
 
     fn bring_to_bench_and_start(&mut self, job_id: JobId, spec: &ModelSpec) -> Vec<Action> {
-        let action = self.place_on_bench(spec);
+        let mut actions = self.demote_for_ram(spec);
+        actions.push(self.place_on_bench(spec));
         self.mark_running(job_id, spec);
-        vec![action, start_action(job_id, &spec.name)]
+        actions.push(start_action(job_id, &spec.name));
+        actions
     }
 
     fn place_on_bench(&mut self, spec: &ModelSpec) -> Action {
@@ -345,19 +365,100 @@ impl Scheduler {
     }
 
     fn sleep_or_discard(&mut self, name: &str) -> Action {
-        let keep_warm = self.models.get(name).map(|m| m.keep_warm).unwrap_or(false);
-        self.idle_since.remove(name);
-        if keep_warm {
+        if self.is_keep_warm(name) {
             self.tiers.insert(name.to_string(), Tier::Shelf);
+            self.stamp_idle(name);
             Action::Sleep {
                 model: name.to_string(),
             }
         } else {
+            self.idle_since.remove(name);
             self.tiers.insert(name.to_string(), Tier::Cupboard);
             Action::Discard {
                 model: name.to_string(),
             }
         }
+    }
+
+    fn prefetch_candidates(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .models
+            .values()
+            .filter(|m| m.keep_warm && self.tier(&m.name) == Tier::Cupboard)
+            .map(|m| m.name.clone())
+            .collect();
+        names.sort_by(|a, b| self.priority_of(b).cmp(&self.priority_of(a)).then(a.cmp(b)));
+        names
+    }
+
+    fn warm_if_fits(&mut self, name: &str) -> Option<Action> {
+        let spec = self.models.get(name)?.clone();
+        if self.ram_over_budget(&spec) {
+            return None;
+        }
+        Some(self.warm(&spec))
+    }
+
+    fn warm(&mut self, spec: &ModelSpec) -> Action {
+        self.tiers.insert(spec.name.clone(), Tier::Shelf);
+        self.stamp_idle(&spec.name);
+        Action::Warm {
+            model: spec.name.clone(),
+        }
+    }
+
+    fn demote_for_ram(&mut self, spec: &ModelSpec) -> Vec<Action> {
+        let mut actions = Vec::new();
+        while self.ram_over_budget(spec) {
+            let Some(victim) = self.lru_shelf_except(&spec.name) else {
+                break;
+            };
+            actions.push(self.discard_shelf(&victim));
+        }
+        actions
+    }
+
+    fn ram_over_budget(&self, spec: &ModelSpec) -> bool {
+        self.ram_used_gb() + self.added_ram(spec) > self.resources.ram_shelf_gb
+    }
+
+    fn added_ram(&self, spec: &ModelSpec) -> f64 {
+        if spec.keep_warm && !self.holds_ram(&spec.name) {
+            spec.ram_gb
+        } else {
+            0.0
+        }
+    }
+
+    fn holds_ram(&self, name: &str) -> bool {
+        match self.tier(name) {
+            Tier::Shelf => true,
+            Tier::Bench => self.is_keep_warm(name),
+            Tier::Cupboard => false,
+        }
+    }
+
+    fn lru_shelf_except(&self, incoming: &str) -> Option<String> {
+        let mut names: Vec<String> = self
+            .tiers
+            .iter()
+            .filter(|(n, t)| **t == Tier::Shelf && *n != incoming)
+            .map(|(n, _)| n.clone())
+            .collect();
+        names.sort_by(|a, b| self.idle_rank(a).cmp(&self.idle_rank(b)).then(a.cmp(b)));
+        names.into_iter().next()
+    }
+
+    fn discard_shelf(&mut self, name: &str) -> Action {
+        self.idle_since.remove(name);
+        self.tiers.insert(name.to_string(), Tier::Cupboard);
+        Action::Discard {
+            model: name.to_string(),
+        }
+    }
+
+    fn is_keep_warm(&self, name: &str) -> bool {
+        self.models.get(name).map(|m| m.keep_warm).unwrap_or(false)
     }
 
     fn can_place(&self, spec: &ModelSpec) -> bool {
@@ -484,9 +585,13 @@ impl Scheduler {
         };
         *n = n.saturating_sub(1);
         if *n == 0 {
-            self.idle_since.insert(model.to_string(), self.idle_tick);
-            self.idle_tick += 1;
+            self.stamp_idle(model);
         }
+    }
+
+    fn stamp_idle(&mut self, name: &str) {
+        self.idle_since.insert(name.to_string(), self.idle_tick);
+        self.idle_tick += 1;
     }
 }
 
