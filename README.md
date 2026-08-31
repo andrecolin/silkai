@@ -1,20 +1,20 @@
 # SilkAI
 
-You have **one GPU** and **several local models**. They do not all fit at once.
-Each app that loads a model tends to keep the memory even when it is idle, so
-the next model never starts — or you sit through a long reload from disk.
+On a server with a 32 GB GPU and 128 GB of RAM, you have three different
+models that can stay in RAM all day. The GPU only holds whoever is working
+right now. A little VRAM is left over for normal machine functions.
 
-SilkAI is a small daemon that owns the GPU for those models. If two fit, they
-run together. If they do not, it parks the idle one in ordinary RAM and brings
-it back in a couple of seconds. Apps use a normal OpenAI-style HTTP API. Rules
-(who can share, who must run alone, who is live) live in a config file, not in
-each request.
+![128 GB RAM keeps three models warm; the 32 GB GPU holds only the model that is working, plus a small slice for the desktop](docs/silkai-memory.svg)
+
+SilkAI is not a new model runner and not a cloud cluster. We only decide who
+is on the GPU, who waits, and who stays warm in RAM.
+
+Apps use a normal OpenAI-style HTTP API. Rules (who can share, who must run
+alone, who is live) live in a config file, not in each request.
 
 [MIT](LICENSE) · [Ko-fi](https://ko-fi.com/andrecolin)
 
 ## A simple workflow
-
-Think of a meeting, not a hospital.
 
 1. **While you talk**, a speech-to-text model stays on the GPU so the transcript
    keeps up. Two people on the same machine can share that one copy.
@@ -30,13 +30,9 @@ Same idea if you code: a small autocomplete model while you type, a large
 “think hard” model when you ask a big question, embeddings for search in the
 gaps. One card, a queue, a warm copy in RAM.
 
-On a desktop with a 32 GB GPU and 128 GB of RAM, all three models can stay in
-RAM all day. The GPU only holds whoever is working right now. A little VRAM is
-left for the display so the machine still feels normal.
-
-SilkAI is not a new model runner and not a cloud cluster. llama.cpp (and later
-Whisper) still generate tokens. We only decide **who is on the GPU**, **who
-waits**, and **who stays warm in RAM**.
+If two models fit, they run together. If they do not, the idle one parks in
+ordinary RAM and comes back in a couple of seconds — not a full reload from
+disk.
 
 ## What that gives you
 
