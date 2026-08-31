@@ -50,3 +50,10 @@ cargo test --features llama
 ```
 
 Scheduler tests do not need a GPU. `cargo test --features llama` builds the llama.cpp adapter.
+
+Optional GPU integration (tiny GGUFs), skipped unless `SILKAI_ITEST=1`:
+
+```bash
+SILKAI_ITEST=1 SILKAI_GGUF_A=/path/tiny.gguf SILKAI_GGUF_B=/path/small.gguf \
+  cargo test -p silkai-server --features llama --test itest_llama -- --nocapture
+```
