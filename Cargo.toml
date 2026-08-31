@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/silkai-sched", "crates/silkai-adapters"]
+members = ["crates/silkai-sched", "crates/silkai-adapters", "crates/silkai-server"]
 
 [workspace.package]
 version = "0.1.0"
