@@ -1,3 +1,14 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# Local agent / memory tooling (do not ship)
+.claude/
+.claude-flow/
+.swarm/
+*.rvf
+*.rvf.lock
+ruvector.db
+*.db
+*.db-shm
+*.db-wal
