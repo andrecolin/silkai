@@ -15,26 +15,33 @@ model with `gpu = 1`.
 SilkAI is not a new model runner and not a cloud cluster. We only decide who
 is on the GPU, who waits, and who stays warm in RAM.
 
-Apps use a normal OpenAI-style HTTP API. Rules (who can share, who must run
-alone, who is live) live in a config file, not in each request.
+Apps use OpenAI-style HTTP and, if you turn it on, a WebSocket per model.
+Rules (who can share, who must run alone, who is live) live in a config file,
+not in each request. Your frontend owns the workflow — SilkAI only runs the
+model you name.
 
 [MIT](LICENSE) · [Ko-fi](https://ko-fi.com/andrecolin)
 
 ## A simple workflow
 
-1. **While you talk**, a speech-to-text model stays on the GPU so the transcript
-   keeps up. Two people on the same machine can share that one copy.
-2. **When you stop**, SilkAI moves speech-to-text into RAM (still ready) and
-   gives the **whole GPU** to a large writing model. That model turns the
-   transcript into a summary or an email.
-3. You can fire **two summaries at once**. They wait in line and reuse the
-   writer that is already loaded — it does not load a second copy.
-4. A **small** model that tags or searches files only runs when there is spare
-   room. It never kicks you off in the middle of talking.
+Your app does the talking. SilkAI only sees models and text.
 
-Same idea if you code: a small autocomplete model while you type, a large
-“think hard” model when you ask a big question, embeddings for search in the
-gaps. One card, a queue, a warm copy in RAM.
+1. Set `transport = "websocket"` (or `"both"`) on whichever model should take
+   a live socket — a speech model, a chat model, anything.
+2. Open `GET /v1/session?model=transcribe`. Speak in **your** UI; send
+   `{"type":"prompt","content":"..."}` (the transcript or a question). Tokens
+   come back as chat on that socket. The GPU holds that model until you hang
+   up or go idle.
+3. When you want notes, **the frontend** sends that text to another model —
+   HTTP `POST /v1/chat/completions` with `"model":"write"`, or a second
+   session socket. SilkAI does not chain models for you.
+4. If the writer needs the whole card, the first model parks in RAM and comes
+   back in a couple of seconds. Two note jobs on the same writer wait in line
+   on one load.
+
+Same idea if you code: socket to an autocomplete model while you type, then
+your IDE posts the hard question to a larger model. One card, a queue, a warm
+copy in RAM.
 
 If two models fit, they run together. If they do not, the idle one parks in
 ordinary RAM and comes back in a couple of seconds — not a full reload from
@@ -59,13 +66,14 @@ Slice 1 is a working **Linux** daemon (`127.0.0.1` only): scheduler, HTTP chat
 completions, fake engines (no GPU required), optional llama.cpp behind
 `--features llama`.
 
-WebSocket is a **per-model** option (`transport = "websocket"` or `"both"`),
-not tied to speech-to-text. An open session holds that model’s slot until the
-socket closes or goes idle.
+WebSocket is a **per-model** option (`transport = "websocket"` or `"both"`).
+Any configured model can take a session. An open socket holds that model’s
+slot until it closes or goes idle. Speech-in, notes-out, SOAP, search — that
+routing stays in your frontend.
 
-Still to come: binary audio on the same session route, more adapters, and
-easier install. The scheduler and HTTP API are meant to stay portable (x86_64
-and ARM; CUDA / Vulkan / Metal via the engine, not the core).
+Still to come: more adapters and easier install. The scheduler and HTTP API
+are meant to stay portable (x86_64 and ARM; CUDA / Vulkan / Metal via the
+engine, not the core).
 
 ## Run
 
@@ -90,10 +98,17 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 
 Streaming: `"stream": true` (SSE). Also `GET /v1/models` and `GET /v1/status`.
 
-Any model with `transport = "websocket"` or `"both"` can hold a slot over a
-socket (`GET /v1/session?model=transcribe`). Send
-`{"type":"prompt","content":"..."}`. The connection keeps that model on the GPU
-until you disconnect or it goes idle.
+Any model with `transport = "websocket"` or `"both"`:
+
+```text
+GET /v1/session?model=transcribe   →  chat tokens on that model
+# your app then:
+POST /v1/chat/completions          { "model": "write", "messages": [...] }
+```
+
+Send `{"type":"prompt","content":"..."}` on the socket. SilkAI does not ingest
+microphone audio; your app turns speech into text (or whatever) and chooses
+the next model.
 
 See `examples/config.toml` for VRAM, `priority` (`live` | `normal` | `background`),
 `exclusive`, `slots`, and `keep_warm`.

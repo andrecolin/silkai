@@ -402,9 +402,12 @@ Protocol (JSON text frames):
   `{ "type": "idle_close" }` and close
 
 A live socket holds one scheduler slot until disconnect or idle close, so a
-high-priority model stays on the GPU between prompts. Binary audio frames for
-speech models can be added on the same route later; they do not get a separate
-Whisper-only endpoint.
+high-priority model stays on the GPU between prompts.
+
+The daemon does **not** own application workflows. A frontend may send
+prompts to model A over WebSocket, then POST the returned text to model B
+(notes, SOAP, search). Chaining models is the client’s job. There is no
+built-in audio codec or Whisper-only route.
 
 ### Binding
 
