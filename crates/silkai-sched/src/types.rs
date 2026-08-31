@@ -5,7 +5,8 @@ pub enum Priority {
     Live,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Tier {
     Cupboard,
     Shelf,
@@ -55,7 +56,7 @@ pub enum SubmitResult {
     Accepted { job_id: JobId, actions: Vec<Action> },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ModelStatus {
     pub name: String,
     pub tier: Tier,
@@ -63,7 +64,7 @@ pub struct ModelStatus {
     pub queued: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct StatusSnapshot {
     pub models: Vec<ModelStatus>,
     pub gpu_used_gb: f64,

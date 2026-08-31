@@ -87,6 +87,15 @@ impl Runtime {
     pub fn status(&self) -> StatusSnapshot {
         self.inner.snapshot.lock().expect("status mutex").clone()
     }
+
+    pub fn configured_models(&self) -> Vec<String> {
+        self.inner
+            .engines
+            .keys()
+            .chain(self.inner.disabled.iter())
+            .cloned()
+            .collect()
+    }
 }
 
 impl Runtime {
