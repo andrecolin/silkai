@@ -1,9 +1,14 @@
 use std::time::Duration;
 
+use axum::http::{header, StatusCode};
+use axum::response::IntoResponse;
+use axum::routing::post;
+use axum::Router;
 use silkai_sched::clinic::{clinic_models, clinic_resources};
 use silkai_sched::{ModelSpec, Priority};
 use silkai_server::config::{AppConfig, ConfiguredModel};
 use silkai_server::runtime::{Runtime, RuntimeError};
+use tokio::net::TcpListener;
 
 fn clinic_cfg() -> AppConfig {
     let models = clinic_models()
@@ -11,6 +16,7 @@ fn clinic_cfg() -> AppConfig {
         .map(|spec| ConfiguredModel {
             engine: "fake".into(),
             path: format!("/models/{}.bin", spec.name),
+            url: None,
             transport: "http".into(),
             idle_timeout_secs: None,
             spec,
@@ -31,6 +37,7 @@ fn too_big() -> ConfiguredModel {
     ConfiguredModel {
         engine: "fake".into(),
         path: "/models/too-big.bin".into(),
+        url: None,
         transport: "http".into(),
         idle_timeout_secs: None,
         spec: ModelSpec {
@@ -109,6 +116,43 @@ fn nope_soap_cfg() -> AppConfig {
     cfg
 }
 
+fn vllm_soap_cfg(url: Option<&str>) -> AppConfig {
+    let mut cfg = clinic_cfg();
+    for model in &mut cfg.enabled {
+        if model.spec.name == "soap" {
+            model.engine = "vllm".into();
+            model.path = "Qwen/Qwen3-0.6B".into();
+            model.url = url.map(str::to_string);
+        }
+    }
+    cfg
+}
+
+#[tokio::test]
+async fn vllm_engine_is_known() {
+    let rt = Runtime::new(vllm_soap_cfg(Some("http://127.0.0.1:1")))
+        .await
+        .unwrap();
+    let err = rt.submit_chat("soap", "x").await.unwrap_err();
+    assert!(
+        !matches!(err, RuntimeError::Unavailable | RuntimeError::Unknown),
+        "expected an engine error, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn vllm_submit_streams_from_http_engine() {
+    let url = spawn_vllm_mock().await;
+    let rt = Runtime::new(vllm_soap_cfg(Some(&url))).await.unwrap();
+    let (job, mut tokens) = rt.submit_chat("soap", "note").await.unwrap();
+    let mut out = String::new();
+    while let Some(t) = tokens.recv().await {
+        out.push_str(&t);
+    }
+    rt.finished(job).await;
+    assert_eq!(out, "hello world");
+}
+
 #[tokio::test]
 async fn unknown_engine_submit_unavailable() {
     let rt = Runtime::new(nope_soap_cfg()).await.unwrap();
@@ -180,4 +224,32 @@ async fn websocket_session_holds_slot_until_end() {
         .find(|m| m.name == "whisper")
         .unwrap();
     assert_eq!(after.running, 0);
+}
+
+async fn spawn_vllm_mock() -> String {
+    let app = Router::new()
+        .route("/sleep", post(vllm_ok))
+        .route("/wake_up", post(vllm_ok))
+        .route("/v1/chat/completions", post(vllm_chat_sse));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn vllm_ok() -> StatusCode {
+    StatusCode::OK
+}
+
+async fn vllm_chat_sse() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/event-stream")],
+        concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        ),
+    )
 }

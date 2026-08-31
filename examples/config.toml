@@ -38,7 +38,10 @@ transport = "both"
 [models.write]
 engine = "fake"
 # engine = "llama.cpp"
+# engine = "vllm"
 path = "/models/write-q4.gguf"
+# path = "Qwen/Qwen3-0.6B"          # vLLM model id
+# url = "http://127.0.0.1:8000"     # vLLM base URL (default)
 vram_gb = 28
 priority = "normal"
 exclusive = true

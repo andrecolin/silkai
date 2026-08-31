@@ -1,7 +1,9 @@
 mod fake;
 mod llama;
+mod vllm;
 pub use fake::FakeEngine;
 pub use llama::LlamaEngine;
+pub use vllm::VllmEngine;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;

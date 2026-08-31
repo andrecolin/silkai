@@ -99,6 +99,7 @@ fn llama_model(
         },
         engine: "llama.cpp".into(),
         path,
+        url: None,
         transport: "http".into(),
         idle_timeout_secs: None,
     }

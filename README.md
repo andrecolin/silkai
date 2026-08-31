@@ -64,16 +64,15 @@ disk.
 
 Slice 1 is a working **Linux** daemon (`127.0.0.1` only): scheduler, HTTP chat
 completions, fake engines (no GPU required), optional llama.cpp behind
-`--features llama`.
+`--features llama`, and a vLLM HTTP adapter (`engine = "vllm"`).
 
 WebSocket is a **per-model** option (`transport = "websocket"` or `"both"`).
 Any configured model can take a session. An open socket holds that model’s
 slot until it closes or goes idle. Speech-in, notes-out, SOAP, search — that
 routing stays in your frontend.
 
-Still to come: more adapters (vLLM and others). The scheduler and HTTP API are
-meant to stay portable (x86_64 and ARM; CUDA / Vulkan / Metal via the engine,
-not the core).
+Still to come: more adapters. The scheduler and HTTP API are meant to stay
+portable (x86_64 and ARM; CUDA / Vulkan / Metal via the engine, not the core).
 
 ## Install
 
@@ -146,6 +145,19 @@ See `examples/config.toml` for VRAM, `priority` (`live` | `normal` | `background
 
 Build llama.cpp support with `cargo run -p silkai --features llama` and set
 `engine = "llama.cpp"` plus a GGUF `path` on that model.
+
+vLLM is an HTTP adapter, not a built-in runner. Start vLLM yourself (sleep
+mode needs `VLLM_SERVER_DEV_MODE=1` and `--enable-sleep-mode`), then:
+
+```toml
+engine = "vllm"
+path = "Qwen/Qwen3-0.6B"          # model id sent to vLLM
+url = "http://127.0.0.1:8000"     # optional; this is the default
+gpu = 0                           # pin SilkAI's budget to the card vLLM uses
+```
+
+SilkAI posts `/wake_up`, `/sleep?level=1`, and streaming `/v1/chat/completions`.
+It does not spawn or stop the vLLM process.
 
 ## Development
 

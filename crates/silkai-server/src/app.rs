@@ -382,6 +382,7 @@ fn fake_model(spec: ModelSpec) -> ConfiguredModel {
     ConfiguredModel {
         engine: "fake".into(),
         path: format!("/models/{}.bin", spec.name),
+        url: None,
         transport: "http".into(),
         idle_timeout_secs: None,
         spec,

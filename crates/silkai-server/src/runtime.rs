@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
-use silkai_adapters::{Engine, EngineError, FakeEngine, LlamaEngine};
+use silkai_adapters::{Engine, EngineError, FakeEngine, LlamaEngine, VllmEngine};
 use silkai_sched::{
     Action, JobId, RejectReason, SchedError, Scheduler, StatusSnapshot, SubmitResult,
 };
@@ -494,12 +494,13 @@ fn arc_engine(model: &ConfiguredModel) -> Option<Arc<dyn Engine>> {
             model.spec.vram_gb,
         ))),
         "llama.cpp" => Some(llama_engine(model)),
+        "vllm" => Some(vllm_engine(model)),
         _ => None,
     }
 }
 
 fn known_engine(engine: &str) -> bool {
-    matches!(engine, "fake" | "llama.cpp")
+    matches!(engine, "fake" | "llama.cpp" | "vllm")
 }
 
 fn transports_for(models: &[ConfiguredModel]) -> HashMap<String, String> {
@@ -524,6 +525,14 @@ fn llama_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {
     Arc::new(LlamaEngine::new(&model.spec.name, model.spec.vram_gb))
 }
 
+fn vllm_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {
+    let url = model
+        .url
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:8000".into());
+    Arc::new(VllmEngine::new(&model.spec.name, model.spec.vram_gb, url))
+}
+
 fn warn_missing_llama() {
     if cfg!(feature = "llama") {
         return;
@@ -544,7 +553,7 @@ fn unavailable_set(models: &[ConfiguredModel]) -> HashSet<String> {
 
 fn engine_available(engine: &str) -> bool {
     match engine {
-        "fake" => true,
+        "fake" | "vllm" => true,
         "llama.cpp" => cfg!(feature = "llama"),
         _ => false,
     }

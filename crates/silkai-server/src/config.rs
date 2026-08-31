@@ -21,6 +21,7 @@ pub struct ConfiguredModel {
     pub spec: ModelSpec,
     pub engine: String,
     pub path: String,
+    pub url: Option<String>,
     pub transport: String,
     pub idle_timeout_secs: Option<u64>,
 }
@@ -86,6 +87,8 @@ struct FileModel {
     idle_timeout_secs: Option<u64>,
     #[serde(default)]
     gpu: Option<u32>,
+    #[serde(default)]
+    url: Option<String>,
 }
 
 pub fn load_from_str(s: &str) -> Result<AppConfig, ConfigError> {
@@ -168,6 +171,7 @@ fn configured_model(name: String, m: FileModel) -> Result<ConfiguredModel, Confi
         },
         engine: m.engine,
         path: m.path,
+        url: m.url,
         transport: m.transport,
         idle_timeout_secs: m.idle_timeout_secs,
     })

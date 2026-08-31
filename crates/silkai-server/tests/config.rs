@@ -106,6 +106,32 @@ gpu = 1
 }
 
 #[test]
+fn parses_vllm_engine_and_url() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+
+[resources]
+gpu_total_gb = 32
+gpu_headroom_gb = 3
+ram_total_gb = 128
+ram_headroom_gb = 32
+
+[models.write]
+engine = "vllm"
+path = "Qwen/Qwen3-0.6B"
+url = "http://127.0.0.1:9000"
+vram_gb = 28
+priority = "normal"
+exclusive = true
+"#;
+    let cfg = load_from_str(t).unwrap();
+    let write = cfg.enabled.iter().find(|m| m.spec.name == "write").unwrap();
+    assert_eq!(write.engine, "vllm");
+    assert_eq!(write.path, "Qwen/Qwen3-0.6B");
+    assert_eq!(write.url.as_deref(), Some("http://127.0.0.1:9000"));
+}
+
+#[test]
 fn missing_gpu_total_errors() {
     let t = r#"
 listen = "127.0.0.1:8080"
