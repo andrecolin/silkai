@@ -18,9 +18,14 @@ const GPU_SHELF: u32 = 0;
 const GPU_BENCH: u32 = 1000;
 const MAX_NEW_TOKENS: i32 = 256;
 
-pub async fn place(inner: Arc<Mutex<Inner>>, path: String, bench: bool) -> Result<(), EngineError> {
+pub async fn place(
+    inner: Arc<Mutex<Inner>>,
+    path: String,
+    bench: bool,
+    gpu: u32,
+) -> Result<(), EngineError> {
     let layers = if bench { GPU_BENCH } else { GPU_SHELF };
-    tokio::task::spawn_blocking(move || place_sync(&inner, &path, layers, bench))
+    tokio::task::spawn_blocking(move || place_sync(&inner, &path, layers, bench, gpu))
         .await
         .map_err(join_err)?
 }
@@ -45,8 +50,9 @@ fn place_sync(
     path: &str,
     layers: u32,
     bench: bool,
+    gpu: u32,
 ) -> Result<(), EngineError> {
-    let model = load_model(path, layers)?;
+    let model = load_model(path, layers, gpu)?;
     let mut g = inner.lock().expect("llama engine mutex");
     g.model = Some(model);
     g.path = Some(path.to_string());
@@ -54,12 +60,14 @@ fn place_sync(
     Ok(())
 }
 
-fn load_model(path: &str, layers: u32) -> Result<LlamaModel, EngineError> {
+fn load_model(path: &str, layers: u32, gpu: u32) -> Result<LlamaModel, EngineError> {
     if !std::path::Path::new(path).exists() {
         return Err(EngineError::Other(format!("missing file: {path}")));
     }
     let backend = backend()?;
-    let params = LlamaModelParams::default().with_n_gpu_layers(layers);
+    let params = LlamaModelParams::default()
+        .with_n_gpu_layers(layers)
+        .with_main_gpu(i32::try_from(gpu).unwrap_or(0));
     LlamaModel::load_from_file(backend, path, &params).map_err(other)
 }
 

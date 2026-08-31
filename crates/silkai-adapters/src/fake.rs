@@ -17,6 +17,7 @@ enum Tier {
 struct Inner {
     log: Vec<String>,
     tier: Tier,
+    gpu: Option<u32>,
 }
 
 pub struct FakeEngine {
@@ -31,12 +32,17 @@ impl FakeEngine {
             inner: Mutex::new(Inner {
                 log: Vec::new(),
                 tier: Tier::Cupboard,
+                gpu: None,
             }),
         }
     }
 
     pub fn log(&self) -> Vec<String> {
         self.lock().log.clone()
+    }
+
+    pub fn gpu(&self) -> Option<u32> {
+        self.lock().gpu
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -61,12 +67,14 @@ impl Engine for FakeEngine {
         Ok(())
     }
 
-    async fn load(&self, _path: &str) -> Result<(), EngineError> {
+    async fn load(&self, _path: &str, gpu: u32) -> Result<(), EngineError> {
+        self.lock().gpu = Some(gpu);
         self.record("load", Tier::Bench);
         Ok(())
     }
 
-    async fn wake(&self) -> Result<(), EngineError> {
+    async fn wake(&self, gpu: u32) -> Result<(), EngineError> {
+        self.lock().gpu = Some(gpu);
         self.record("wake", Tier::Bench);
         Ok(())
     }
@@ -131,17 +139,18 @@ mod tests {
     #[tokio::test]
     async fn fake_load_sleep_wake_records_order() {
         let e = FakeEngine::new("soap", 28.0);
-        e.load("/models/soap.gguf").await.unwrap();
+        e.load("/models/soap.gguf", 0).await.unwrap();
         e.sleep().await.unwrap();
-        e.wake().await.unwrap();
+        e.wake(1).await.unwrap();
         assert_eq!(e.log(), vec!["load", "sleep", "wake"]);
+        assert_eq!(e.gpu(), Some(1));
         assert_eq!(e.measured_vram_gb(), 28.0);
     }
 
     #[tokio::test]
     async fn fake_run_streams_two_chunks_then_done() {
         let e = FakeEngine::new("soap", 28.0);
-        e.load("/x").await.unwrap();
+        e.load("/x", 0).await.unwrap();
         let cancel = CancellationToken::new();
         let mut rx = e.run("hello", cancel).await.unwrap();
         let mut got = Vec::new();
@@ -154,7 +163,7 @@ mod tests {
     #[tokio::test]
     async fn fake_run_stops_on_cancel() {
         let e = FakeEngine::new("soap", 28.0);
-        e.load("/x").await.unwrap();
+        e.load("/x", 0).await.unwrap();
         let cancel = CancellationToken::new();
         cancel.cancel();
         let mut rx = e.run("hello", cancel).await.unwrap();

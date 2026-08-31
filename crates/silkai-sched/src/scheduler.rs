@@ -375,9 +375,11 @@ impl Scheduler {
         match from {
             Tier::Shelf => Action::Wake {
                 model: spec.name.clone(),
+                gpu,
             },
             _ => Action::Load {
                 model: spec.name.clone(),
+                gpu,
             },
         }
     }

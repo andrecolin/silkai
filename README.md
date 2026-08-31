@@ -60,10 +60,9 @@ completions, fake engines (no GPU required), optional llama.cpp behind
 `--features llama`.
 
 Still to come: live speech-to-text over WebSocket (an open connection keeps
-that model high-priority), pointing llama.cpp at a specific CUDA device,
-more adapters, and easier install. The scheduler and HTTP API are meant to
-stay portable (x86_64 and ARM; CUDA / Vulkan / Metal via the engine, not the
-core).
+that model high-priority), more adapters, and easier install. The scheduler
+and HTTP API are meant to stay portable (x86_64 and ARM; CUDA / Vulkan / Metal
+via the engine, not the core).
 
 ## Run
 

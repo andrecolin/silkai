@@ -163,7 +163,7 @@ fn two_queued_soap_notes_keep_resident_copy() {
     )));
     assert!(!after_a.iter().any(|a| matches!(
         a,
-        Action::Load { model } | Action::Wake { model } | Action::Sleep { model }
+        Action::Load { model, .. } | Action::Wake { model, .. } | Action::Sleep { model }
         if model == "soap" || model == "chart-scan"
     )));
     assert!(!after_a

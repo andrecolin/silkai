@@ -18,8 +18,8 @@ pub enum EngineError {
 #[async_trait]
 pub trait Engine: Send + Sync {
     async fn warm(&self, path: &str) -> Result<(), EngineError>;
-    async fn load(&self, path: &str) -> Result<(), EngineError>;
-    async fn wake(&self) -> Result<(), EngineError>;
+    async fn load(&self, path: &str, gpu: u32) -> Result<(), EngineError>;
+    async fn wake(&self, gpu: u32) -> Result<(), EngineError>;
     async fn sleep(&self) -> Result<(), EngineError>;
     async fn discard(&self) -> Result<(), EngineError>;
     async fn run(

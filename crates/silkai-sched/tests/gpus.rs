@@ -79,6 +79,29 @@ fn eighty_and_thirty_run_on_two_gpus() {
 }
 
 #[test]
+fn load_actions_name_the_gpu() {
+    let mut s = Scheduler::new(two_gpu_resources(), vec![writer(), indexer()]).unwrap();
+    match s.submit("write") {
+        SubmitResult::Accepted { actions, .. } => {
+            assert!(actions.iter().any(|a| matches!(
+                a,
+                Action::Load { model, gpu } if model == "write" && *gpu == 0
+            )));
+        }
+        other => panic!("{other:?}"),
+    }
+    match s.submit("index") {
+        SubmitResult::Accepted { actions, .. } => {
+            assert!(actions.iter().any(|a| matches!(
+                a,
+                Action::Load { model, gpu } if model == "index" && *gpu == 1
+            )));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn exclusive_on_gpu0_does_not_evict_gpu1() {
     let mut s = Scheduler::new(two_gpu_resources(), vec![writer(), indexer()]).unwrap();
     s.submit("index");

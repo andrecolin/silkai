@@ -72,8 +72,8 @@ pub struct ModelSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Warm { model: String },
-    Load { model: String },
-    Wake { model: String },
+    Load { model: String, gpu: u32 },
+    Wake { model: String, gpu: u32 },
     Sleep { model: String },
     Discard { model: String },
     Start { job_id: JobId, model: String },

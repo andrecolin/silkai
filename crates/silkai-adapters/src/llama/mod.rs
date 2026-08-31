@@ -49,21 +49,21 @@ impl LlamaEngine {
 #[async_trait]
 impl Engine for LlamaEngine {
     async fn warm(&self, path: &str) -> Result<(), EngineError> {
-        place_model(self, path, false).await
+        place_model(self, path, false, 0).await
     }
 
-    async fn load(&self, path: &str) -> Result<(), EngineError> {
-        place_model(self, path, true).await
+    async fn load(&self, path: &str, gpu: u32) -> Result<(), EngineError> {
+        place_model(self, path, true, gpu).await
     }
 
-    async fn wake(&self) -> Result<(), EngineError> {
+    async fn wake(&self, gpu: u32) -> Result<(), EngineError> {
         let path = self.stored_path()?;
-        place_model(self, &path, true).await
+        place_model(self, &path, true, gpu).await
     }
 
     async fn sleep(&self) -> Result<(), EngineError> {
         let path = self.stored_path()?;
-        place_model(self, &path, false).await
+        place_model(self, &path, false, 0).await
     }
 
     async fn discard(&self) -> Result<(), EngineError> {
@@ -90,13 +90,23 @@ impl Engine for LlamaEngine {
 }
 
 #[cfg(feature = "llama")]
-async fn place_model(engine: &LlamaEngine, path: &str, bench: bool) -> Result<(), EngineError> {
-    cpp::place(Arc::clone(&engine.inner), path.to_string(), bench).await
+async fn place_model(
+    engine: &LlamaEngine,
+    path: &str,
+    bench: bool,
+    gpu: u32,
+) -> Result<(), EngineError> {
+    cpp::place(Arc::clone(&engine.inner), path.to_string(), bench, gpu).await
 }
 
 #[cfg(not(feature = "llama"))]
-async fn place_model(engine: &LlamaEngine, path: &str, bench: bool) -> Result<(), EngineError> {
-    let _ = (engine, path);
+async fn place_model(
+    engine: &LlamaEngine,
+    path: &str,
+    bench: bool,
+    gpu: u32,
+) -> Result<(), EngineError> {
+    let _ = (engine, path, gpu);
     if bench {
         refuse_without_feature()
     } else {
@@ -136,7 +146,7 @@ mod llama_feature_tests {
     #[tokio::test]
     async fn llama_rejects_missing_file() {
         let e = LlamaEngine::new("soap", 1.0);
-        let err = e.load("/no/such/model.gguf").await.unwrap_err();
+        let err = e.load("/no/such/model.gguf", 0).await.unwrap_err();
         assert!(matches!(err, EngineError::Other(_)));
     }
 }
@@ -150,7 +160,7 @@ mod llama_stub_tests {
     #[tokio::test]
     async fn load_fails_without_feature() {
         let e = LlamaEngine::new("soap", 1.0);
-        let err = e.load("/no/such/model.gguf").await.unwrap_err();
+        let err = e.load("/no/such/model.gguf", 1).await.unwrap_err();
         match err {
             EngineError::Other(msg) => assert!(msg.contains("llama")),
             other => panic!("expected Other, got {other:?}"),

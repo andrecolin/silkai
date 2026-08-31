@@ -33,7 +33,7 @@ fn second_run_wakes_from_shelf_not_load() {
         SubmitResult::Accepted { actions, .. } => {
             assert!(actions
                 .iter()
-                .any(|a| matches!(a, Action::Wake { model } if model == "soap")));
+                .any(|a| matches!(a, Action::Wake { model, .. } if model == "soap")));
             assert!(!actions.iter().any(|a| matches!(a, Action::Load { .. })));
         }
         _ => panic!(),

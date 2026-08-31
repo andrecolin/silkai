@@ -266,8 +266,8 @@ impl Runtime {
     async fn apply(&self, action: Action) -> Result<(), RuntimeError> {
         match action {
             Action::Warm { model } => self.warm(&model).await,
-            Action::Load { model } => self.load(&model).await,
-            Action::Wake { model } => self.wake(&model).await,
+            Action::Load { model, gpu } => self.load(&model, gpu).await,
+            Action::Wake { model, gpu } => self.wake(&model, gpu).await,
             Action::Sleep { model } => self.sleep(&model).await,
             Action::Discard { model } => self.discard(&model).await,
             Action::Preempt { job_id } => self.preempt(job_id).await,
@@ -280,13 +280,16 @@ impl Runtime {
         self.engine(model)?.warm(path).await.map_err(engine_err)
     }
 
-    async fn load(&self, model: &str) -> Result<(), RuntimeError> {
+    async fn load(&self, model: &str, gpu: u32) -> Result<(), RuntimeError> {
         let path = self.path(model)?;
-        self.engine(model)?.load(path).await.map_err(engine_err)
+        self.engine(model)?
+            .load(path, gpu)
+            .await
+            .map_err(engine_err)
     }
 
-    async fn wake(&self, model: &str) -> Result<(), RuntimeError> {
-        self.engine(model)?.wake().await.map_err(engine_err)
+    async fn wake(&self, model: &str, gpu: u32) -> Result<(), RuntimeError> {
+        self.engine(model)?.wake(gpu).await.map_err(engine_err)
     }
 
     async fn sleep(&self, model: &str) -> Result<(), RuntimeError> {
