@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use silkai_adapters::{Engine, EngineError, FakeEngine};
 use silkai_sched::{
@@ -35,10 +35,13 @@ struct Inner {
     disabled: HashSet<String>,
     waiters: Mutex<HashMap<JobId, Waiter>>,
     cancels: Mutex<HashMap<JobId, CancellationToken>>,
+    apply_tx: mpsc::UnboundedSender<Vec<Action>>,
+    apply_rx: Mutex<Option<mpsc::UnboundedReceiver<Vec<Action>>>>,
 }
 
 impl Inner {
     fn new(scheduler: Scheduler, cfg: &AppConfig) -> Self {
+        let (apply_tx, apply_rx) = mpsc::unbounded_channel();
         Self {
             snapshot: StdMutex::new(scheduler.status()),
             scheduler: Mutex::new(scheduler),
@@ -47,6 +50,8 @@ impl Inner {
             disabled: disabled_set(&cfg.disabled),
             waiters: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
+            apply_tx,
+            apply_rx: Mutex::new(Some(apply_rx)),
         }
     }
 }
@@ -59,6 +64,7 @@ pub struct Runtime {
 impl Runtime {
     pub async fn new(cfg: AppConfig) -> Result<Self, RuntimeError> {
         let (rt, warmup) = Self::assemble(cfg)?;
+        rt.spawn_applier().await;
         rt.apply_all(warmup).await?;
         Ok(rt)
     }
@@ -120,12 +126,51 @@ impl Runtime {
     }
 
     async fn complete(&self, job_id: JobId) -> Result<(), RuntimeError> {
+        let actions = self.release_job(job_id).await?;
+        self.apply_locked(actions).await
+    }
+
+    async fn release_job(&self, job_id: JobId) -> Result<Vec<Action>, RuntimeError> {
         let mut sched = self.inner.scheduler.lock().await;
-        self.forget(job_id).await;
+        if !self.is_active(job_id).await {
+            return Ok(Vec::new());
+        }
         let actions = sched.finish(job_id);
-        self.apply_all(actions).await?;
         self.record_status(&sched);
-        Ok(())
+        drop(sched);
+        self.forget(job_id).await;
+        Ok(actions)
+    }
+
+    async fn apply_locked(&self, actions: Vec<Action>) -> Result<(), RuntimeError> {
+        if actions.is_empty() {
+            return Ok(());
+        }
+        let sched = self.inner.scheduler.lock().await;
+        let result = self.apply_all(actions).await;
+        self.record_status(&sched);
+        result
+    }
+
+    fn enqueue_apply(&self, actions: Vec<Action>) {
+        if actions.is_empty() {
+            return;
+        }
+        let _ = self.inner.apply_tx.send(actions);
+    }
+
+    async fn spawn_applier(&self) {
+        let Some(rx) = self.inner.apply_rx.lock().await.take() else {
+            return;
+        };
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            apply_loop(weak, rx).await;
+        });
+    }
+
+    async fn is_active(&self, job_id: JobId) -> bool {
+        self.inner.cancels.lock().await.contains_key(&job_id)
     }
 
     fn record_status(&self, sched: &Scheduler) {
@@ -215,21 +260,17 @@ impl Runtime {
     }
 
     async fn start(&self, job_id: JobId, model: &str) -> Result<(), RuntimeError> {
-        let (prompt, tx) = self.require_waiter(job_id).await?;
+        let Some((prompt, tx)) = self.waiter(job_id).await else {
+            return Ok(());
+        };
         let token = self.watch(job_id).await;
-        let rx = self.engine(model)?.run(&prompt, token.clone()).await?;
-        let inner = Arc::clone(&self.inner);
-        tokio::spawn(forward_job(job_id, rx, tx, token, inner));
+        let engine = Arc::clone(self.engine(model)?);
+        let rx = engine.run(&prompt, token.clone()).await?;
+        let rt = self.clone();
+        tokio::spawn(async move {
+            forward_job(job_id, rx, tx, token, rt).await;
+        });
         Ok(())
-    }
-
-    async fn require_waiter(
-        &self,
-        job_id: JobId,
-    ) -> Result<(String, mpsc::Sender<String>), RuntimeError> {
-        self.waiter(job_id)
-            .await
-            .ok_or_else(|| RuntimeError::Engine(EngineError::Other("missing waiter".into())))
     }
 
     fn engine(&self, model: &str) -> Result<&Arc<dyn Engine>, RuntimeError> {
@@ -253,13 +294,24 @@ async fn forward_job(
     rx: mpsc::Receiver<String>,
     tx: mpsc::Sender<String>,
     token: CancellationToken,
-    inner: Arc<Inner>,
+    rt: Runtime,
 ) {
     pump_tokens(rx, tx, token.clone()).await;
     if token.is_cancelled() {
         return;
     }
-    inner.waiters.lock().await.remove(&job_id);
+    if let Ok(actions) = rt.release_job(job_id).await {
+        rt.enqueue_apply(actions);
+    }
+}
+
+async fn apply_loop(weak: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Vec<Action>>) {
+    while let Some(actions) = rx.recv().await {
+        let Some(inner) = weak.upgrade() else {
+            break;
+        };
+        let _ = Runtime { inner }.apply_locked(actions).await;
+    }
 }
 
 async fn pump_tokens(

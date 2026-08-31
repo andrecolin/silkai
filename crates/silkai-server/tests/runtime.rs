@@ -72,3 +72,15 @@ async fn disabled_model_errors() {
     let err = rt.submit_chat("too-big", "x").await.unwrap_err();
     assert!(matches!(err, RuntimeError::Disabled));
 }
+
+#[tokio::test]
+async fn stream_end_then_live_submit_does_not_panic() {
+    let rt = Runtime::new(clinic_cfg()).await.unwrap();
+    let (soap_job, mut tokens) = rt.submit_chat("soap", "note").await.unwrap();
+    while tokens.recv().await.is_some() {}
+    // do NOT call finished(soap) yet
+    let (w_job, mut wtok) = rt.submit_chat("whisper", "hi").await.unwrap();
+    while wtok.recv().await.is_some() {}
+    rt.finished(soap_job).await; // must not panic; should be idempotent
+    rt.finished(w_job).await; // must not panic
+}
