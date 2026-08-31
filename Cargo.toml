@@ -11,4 +11,4 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/silkai/silkai"
+repository = "https://github.com/andrecolin/silkai"

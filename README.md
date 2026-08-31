@@ -71,22 +71,53 @@ Any configured model can take a session. An open socket holds that model’s
 slot until it closes or goes idle. Speech-in, notes-out, SOAP, search — that
 routing stays in your frontend.
 
-Still to come: more adapters and easier install. The scheduler and HTTP API
-are meant to stay portable (x86_64 and ARM; CUDA / Vulkan / Metal via the
-engine, not the core).
+Still to come: more adapters (vLLM and others). The scheduler and HTTP API are
+meant to stay portable (x86_64 and ARM; CUDA / Vulkan / Metal via the engine,
+not the core).
 
-## Run
+## Install
 
-Requires Rust 1.80+. Fake engines need no GPU:
+Needs Rust 1.80+ ([rustup](https://rustup.rs)). Fake engines need no GPU.
 
 ```bash
-mkdir -p ~/.config/silkai
-cp examples/config.toml ~/.config/silkai/config.toml
-cargo run -p silkai
+git clone https://github.com/andrecolin/silkai
+cd silkai
+./scripts/install.sh
+```
+
+That puts `silkai` in `~/.local/bin`, writes `~/.config/silkai/config.toml` if
+missing, and installs a **user** systemd unit on Linux:
+
+```bash
+systemctl --user enable --now silkai
 curl -s http://127.0.0.1:8080/health
 ```
 
-Config is `~/.config/silkai/config.toml`, or `SILKAI_CONFIG`.
+llama.cpp (real GGUFs):
+
+```bash
+FEATURES=llama ./scripts/install.sh
+```
+
+Without the script:
+
+```bash
+cargo install --path crates/silkai --locked
+# optional: --features llama
+mkdir -p ~/.config/silkai
+cp examples/config.toml ~/.config/silkai/config.toml
+silkai
+```
+
+Config is `~/.config/silkai/config.toml`, or `SILKAI_CONFIG`. The daemon
+listens on `127.0.0.1` only.
+
+## Run from a checkout
+
+```bash
+cargo run -p silkai
+curl -s http://127.0.0.1:8080/health
+```
 
 The example file names the three roles above `transcribe`, `write`, and `index`:
 

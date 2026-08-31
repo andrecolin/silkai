@@ -1,0 +1,13 @@
+[Unit]
+Description=SilkAI local GPU scheduler
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=@BIN@
+Restart=on-failure
+RestartSec=2
+Environment=SILKAI_CONFIG=%h/.config/silkai/config.toml
+
+[Install]
+WantedBy=default.target
