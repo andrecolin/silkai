@@ -114,7 +114,7 @@ async fn stream_chunks(tx: mpsc::Sender<String>, prompt: String, cancel: Cancell
     }
     tokio::select! {
         _ = cancel.cancelled() => return,
-        _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        _ = tokio::time::sleep(Duration::from_millis(80)) => {}
     }
     if cancel.is_cancelled() {
         return;

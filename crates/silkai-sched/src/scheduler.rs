@@ -137,6 +137,14 @@ impl Scheduler {
         self.admit_from_queue()
     }
 
+    pub fn drop_job(&mut self, job_id: JobId) -> Vec<Action> {
+        if self.queue.iter().any(|(id, _)| *id == job_id) {
+            self.remove_queued(job_id);
+            return Vec::new();
+        }
+        self.finish(job_id)
+    }
+
     fn alloc_id(&mut self) -> JobId {
         let id = JobId(self.next_id);
         self.next_id += 1;

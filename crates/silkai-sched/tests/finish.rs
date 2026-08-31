@@ -41,3 +41,15 @@ fn finishing_whisper_and_scan_allows_queued_soap() {
     assert_eq!(s.tier("soap"), silkai_sched::Tier::Bench);
     assert!(s.finish(c).is_empty());
 }
+
+#[test]
+fn drop_queued_job_leaves_running_untouched() {
+    let mut s = sched();
+    s.submit("whisper");
+    let soap = job_id(s.submit("soap"));
+    assert_eq!(s.queued("soap"), 1);
+    assert!(s.drop_job(soap).is_empty());
+    assert_eq!(s.queued("soap"), 0);
+    assert_eq!(s.running("whisper"), 1);
+    assert!(s.drop_job(JobId(99)).is_empty());
+}

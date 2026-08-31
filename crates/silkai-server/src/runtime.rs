@@ -87,6 +87,17 @@ impl Runtime {
         self.complete(job_id).await.expect("runtime finish actions");
     }
 
+    pub async fn drop_job(&self, job_id: JobId) {
+        self.forget(job_id).await;
+        let actions = {
+            let mut sched = self.inner.scheduler.lock().await;
+            let actions = sched.drop_job(job_id);
+            self.record_status(&sched);
+            actions
+        };
+        self.enqueue_apply(actions);
+    }
+
     pub fn status(&self) -> StatusSnapshot {
         self.inner.snapshot.lock().expect("status mutex").clone()
     }

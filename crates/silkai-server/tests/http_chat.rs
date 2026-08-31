@@ -74,3 +74,37 @@ async fn timeout_while_queued_returns_504() {
     let res = app.oneshot(chat("soap", true)).await.unwrap();
     assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
 }
+
+#[tokio::test]
+async fn timeout_does_not_leave_soap_queued() {
+    let app = silkai_server::app::test_app_timeout_ms(1).await;
+    let whisper_app = app.clone();
+    let whisper = tokio::spawn(async move {
+        let _ = whisper_app.oneshot(chat("whisper", true)).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let res = app.clone().oneshot(chat("soap", true)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::GATEWAY_TIMEOUT);
+    let status = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(status.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let soap = v["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "soap")
+        .unwrap();
+    assert_eq!(soap["queued"], 0);
+    assert_eq!(soap["running"], 0);
+    let _ = whisper.await;
+}

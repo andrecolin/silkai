@@ -1,11 +1,14 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::stream::unfold;
 use serde::{Deserialize, Serialize};
 use silkai_sched::clinic::{clinic_models, clinic_resources};
 use silkai_sched::{JobId, ModelSpec, Priority, StatusSnapshot};
@@ -94,17 +97,30 @@ async fn finish_chat(
     rx: mpsc::Receiver<String>,
     stream: bool,
 ) -> Response {
-    match timed_tokens(rt, rx).await {
-        Ok(tokens) if stream => sse_response(job, &tokens),
-        Ok(tokens) => json_completion(&tokens),
-        Err(status) => status.into_response(),
+    if stream {
+        stream_or_timeout(rt, job, rx).await
+    } else {
+        json_or_timeout(rt, job, rx).await
     }
 }
 
-async fn timed_tokens(rt: &Runtime, rx: mpsc::Receiver<String>) -> Result<Vec<String>, StatusCode> {
-    tokio::time::timeout(rt.request_timeout(), collect_tokens(rx))
-        .await
-        .map_err(|_| StatusCode::GATEWAY_TIMEOUT)
+async fn stream_or_timeout(rt: &Runtime, job: JobId, mut rx: mpsc::Receiver<String>) -> Response {
+    match tokio::time::timeout(rt.request_timeout(), rx.recv()).await {
+        Ok(first) => sse_response(job, first, rx),
+        Err(_) => timeout_drop(rt, job).await,
+    }
+}
+
+async fn json_or_timeout(rt: &Runtime, job: JobId, rx: mpsc::Receiver<String>) -> Response {
+    match tokio::time::timeout(rt.request_timeout(), collect_tokens(rx)).await {
+        Ok(tokens) => json_completion(&tokens),
+        Err(_) => timeout_drop(rt, job).await,
+    }
+}
+
+async fn timeout_drop(rt: &Runtime, job: JobId) -> Response {
+    rt.drop_job(job).await;
+    StatusCode::GATEWAY_TIMEOUT.into_response()
 }
 
 async fn collect_tokens(mut rx: mpsc::Receiver<String>) -> Vec<String> {
@@ -115,24 +131,75 @@ async fn collect_tokens(mut rx: mpsc::Receiver<String>) -> Vec<String> {
     tokens
 }
 
-fn sse_response(job: JobId, tokens: &[String]) -> Response {
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/event-stream")],
-        sse_body(job, tokens),
-    )
-        .into_response()
+fn sse_response(job: JobId, first: Option<String>, rx: mpsc::Receiver<String>) -> Response {
+    let start = SsePhase::Comment { job, first, rx };
+    Sse::new(unfold(start, |phase| async move {
+        let (event, next) = next_sse(phase).await?;
+        Some((Ok::<_, Infallible>(event), next))
+    }))
+    .into_response()
 }
 
-fn sse_body(job: JobId, tokens: &[String]) -> String {
-    let mut body = String::from(": queued\n\n");
-    for token in tokens {
-        body.push_str("data: ");
-        body.push_str(&chunk_json(job, token));
-        body.push_str("\n\n");
+enum SsePhase {
+    Comment {
+        job: JobId,
+        first: Option<String>,
+        rx: mpsc::Receiver<String>,
+    },
+    Tokens {
+        job: JobId,
+        pending: Option<String>,
+        rx: mpsc::Receiver<String>,
+    },
+    Done,
+}
+
+async fn next_sse(phase: SsePhase) -> Option<(Event, SsePhase)> {
+    match phase {
+        SsePhase::Comment { job, first, rx } => Some(queued_then(job, first, rx)),
+        SsePhase::Tokens { job, pending, rx } => token_or_done(job, pending, rx).await,
+        SsePhase::Done => None,
     }
-    body.push_str("data: [DONE]\n\n");
-    body
+}
+
+fn queued_then(job: JobId, first: Option<String>, rx: mpsc::Receiver<String>) -> (Event, SsePhase) {
+    (
+        Event::default().comment("queued"),
+        SsePhase::Tokens {
+            job,
+            pending: first,
+            rx,
+        },
+    )
+}
+
+async fn token_or_done(
+    job: JobId,
+    pending: Option<String>,
+    mut rx: mpsc::Receiver<String>,
+) -> Option<(Event, SsePhase)> {
+    match pending {
+        Some(token) => Some(data_then_rest(job, token, rx)),
+        None => match rx.recv().await {
+            Some(token) => Some(data_then_rest(job, token, rx)),
+            None => Some((Event::default().data("[DONE]"), SsePhase::Done)),
+        },
+    }
+}
+
+fn data_then_rest(job: JobId, token: String, rx: mpsc::Receiver<String>) -> (Event, SsePhase) {
+    (
+        data_event(job, &token),
+        SsePhase::Tokens {
+            job,
+            pending: None,
+            rx,
+        },
+    )
+}
+
+fn data_event(job: JobId, token: &str) -> Event {
+    Event::default().data(chunk_json(job, token))
 }
 
 fn chunk_json(job: JobId, token: &str) -> String {
