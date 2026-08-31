@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
-use silkai_adapters::{Engine, EngineError, FakeEngine};
+use silkai_adapters::{Engine, EngineError, FakeEngine, LlamaEngine};
 use silkai_sched::{
     Action, JobId, RejectReason, SchedError, Scheduler, StatusSnapshot, SubmitResult,
 };
@@ -19,6 +19,8 @@ pub enum RuntimeError {
     Disabled,
     #[error("model too large")]
     TooLarge,
+    #[error("engine unavailable")]
+    Unavailable,
     #[error(transparent)]
     Engine(#[from] EngineError),
 }
@@ -34,6 +36,7 @@ struct Inner {
     engines: HashMap<String, Arc<dyn Engine>>,
     paths: HashMap<String, String>,
     disabled: HashSet<String>,
+    unavailable: HashSet<String>,
     waiters: Mutex<HashMap<JobId, Waiter>>,
     cancels: Mutex<HashMap<JobId, CancellationToken>>,
     apply_tx: mpsc::UnboundedSender<Vec<Action>>,
@@ -50,6 +53,7 @@ impl Inner {
             engines: engines_for(&cfg.enabled),
             paths: paths_for(&cfg.enabled),
             disabled: disabled_set(&cfg.disabled),
+            unavailable: unavailable_set(&cfg.enabled),
             waiters: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             apply_tx,
@@ -78,6 +82,7 @@ impl Runtime {
         prompt: &str,
     ) -> Result<(JobId, mpsc::Receiver<String>), RuntimeError> {
         self.ensure_enabled(model)?;
+        self.ensure_available(model)?;
         let (tx, rx) = mpsc::channel(16);
         let job_id = self.accept(model, prompt, tx).await?;
         Ok((job_id, rx))
@@ -130,6 +135,14 @@ impl Runtime {
     fn ensure_enabled(&self, model: &str) -> Result<(), RuntimeError> {
         if self.inner.disabled.contains(model) {
             Err(RuntimeError::Disabled)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ensure_available(&self, model: &str) -> Result<(), RuntimeError> {
+        if self.inner.unavailable.contains(model) {
+            Err(RuntimeError::Unavailable)
         } else {
             Ok(())
         }
@@ -259,24 +272,24 @@ impl Runtime {
 
     async fn warm(&self, model: &str) -> Result<(), RuntimeError> {
         let path = self.path(model)?;
-        Ok(self.engine(model)?.warm(path).await?)
+        self.engine(model)?.warm(path).await.map_err(engine_err)
     }
 
     async fn load(&self, model: &str) -> Result<(), RuntimeError> {
         let path = self.path(model)?;
-        Ok(self.engine(model)?.load(path).await?)
+        self.engine(model)?.load(path).await.map_err(engine_err)
     }
 
     async fn wake(&self, model: &str) -> Result<(), RuntimeError> {
-        Ok(self.engine(model)?.wake().await?)
+        self.engine(model)?.wake().await.map_err(engine_err)
     }
 
     async fn sleep(&self, model: &str) -> Result<(), RuntimeError> {
-        Ok(self.engine(model)?.sleep().await?)
+        self.engine(model)?.sleep().await.map_err(engine_err)
     }
 
     async fn discard(&self, model: &str) -> Result<(), RuntimeError> {
-        Ok(self.engine(model)?.discard().await?)
+        self.engine(model)?.discard().await.map_err(engine_err)
     }
 
     async fn preempt(&self, job_id: JobId) -> Result<(), RuntimeError> {
@@ -292,7 +305,10 @@ impl Runtime {
         };
         let token = self.watch(job_id).await;
         let engine = Arc::clone(self.engine(model)?);
-        let rx = engine.run(&prompt, token.clone()).await?;
+        let rx = engine
+            .run(&prompt, token.clone())
+            .await
+            .map_err(engine_err)?;
         let rt = self.clone();
         tokio::spawn(async move {
             forward_job(job_id, rx, tx, token, rt).await;
@@ -372,11 +388,50 @@ fn prefetch_actions(scheduler: &mut Scheduler, prefetch: bool) -> Vec<Action> {
 fn engines_for(models: &[ConfiguredModel]) -> HashMap<String, Arc<dyn Engine>> {
     models
         .iter()
-        .map(|m| {
-            let engine = FakeEngine::new(&m.spec.name, m.spec.vram_gb);
-            (m.spec.name.clone(), Arc::new(engine) as Arc<dyn Engine>)
-        })
+        .map(|m| (m.spec.name.clone(), arc_engine(m)))
         .collect()
+}
+
+fn arc_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {
+    if model.engine == "llama.cpp" {
+        llama_engine(model)
+    } else {
+        Arc::new(FakeEngine::new(&model.spec.name, model.spec.vram_gb))
+    }
+}
+
+fn llama_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {
+    warn_missing_llama();
+    Arc::new(LlamaEngine::new(&model.spec.name, model.spec.vram_gb))
+}
+
+fn warn_missing_llama() {
+    if cfg!(feature = "llama") {
+        return;
+    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        eprintln!("llama.cpp requested but built without feature llama");
+    });
+}
+
+fn unavailable_set(models: &[ConfiguredModel]) -> HashSet<String> {
+    models
+        .iter()
+        .filter(|m| m.engine == "llama.cpp" && !cfg!(feature = "llama"))
+        .map(|m| m.spec.name.clone())
+        .collect()
+}
+
+fn engine_err(err: EngineError) -> RuntimeError {
+    match err {
+        EngineError::Other(msg) if is_unavailable(&msg) => RuntimeError::Unavailable,
+        other => RuntimeError::Engine(other),
+    }
+}
+
+fn is_unavailable(msg: &str) -> bool {
+    msg.contains("built without feature llama") || msg.contains("native library not linked")
 }
 
 fn paths_for(models: &[ConfiguredModel]) -> HashMap<String, String> {

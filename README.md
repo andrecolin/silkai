@@ -46,6 +46,7 @@ in this file — requests just send `"model"`.
 
 ```bash
 cargo test
+cargo test --features llama
 ```
 
-Scheduler tests do not need a GPU.
+Scheduler tests do not need a GPU. `cargo test --features llama` builds the llama.cpp adapter.

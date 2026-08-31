@@ -49,6 +49,20 @@ pub async fn test_app_timeout_ms(ms: u64) -> Router {
     app_from_config(cfg).await
 }
 
+pub async fn test_app_llama_soap() -> Router {
+    app_from_config(llama_soap_cfg()).await
+}
+
+fn llama_soap_cfg() -> AppConfig {
+    let mut cfg = clinic_cfg();
+    for model in &mut cfg.enabled {
+        if model.spec.name == "soap" {
+            model.engine = "llama.cpp".into();
+        }
+    }
+    cfg
+}
+
 async fn build_runtime(cfg: AppConfig) -> Runtime {
     Runtime::new(cfg).await.expect("runtime")
 }
@@ -288,6 +302,7 @@ fn chat_error(err: RuntimeError) -> StatusCode {
     match err {
         RuntimeError::Unknown => StatusCode::NOT_FOUND,
         RuntimeError::Disabled | RuntimeError::TooLarge => StatusCode::BAD_REQUEST,
+        RuntimeError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeError::Engine(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

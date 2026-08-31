@@ -1,5 +1,7 @@
 mod fake;
+mod llama;
 pub use fake::FakeEngine;
+pub use llama::LlamaEngine;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;

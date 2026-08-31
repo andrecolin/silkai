@@ -24,6 +24,14 @@ async fn unknown_model_404() {
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
+#[cfg(not(feature = "llama"))]
+#[tokio::test]
+async fn llama_cpp_without_feature_returns_503() {
+    let app = silkai_server::app::test_app_llama_soap().await;
+    let res = app.oneshot(chat("soap", false)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
 #[tokio::test]
 async fn disabled_model_400() {
     let app = silkai_server::app::test_app_with_disabled().await;

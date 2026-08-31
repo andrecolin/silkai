@@ -1,0 +1,169 @@
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use async_trait::async_trait;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use crate::{Engine, EngineError};
+
+#[cfg(feature = "llama")]
+mod cpp;
+
+#[cfg(not(feature = "llama"))]
+const NO_FEATURE: &str = "built without feature llama";
+
+pub struct LlamaEngine {
+    vram_gb: f64,
+    inner: Arc<Mutex<Inner>>,
+}
+
+pub(crate) struct Inner {
+    pub on_bench: bool,
+    pub path: Option<String>,
+    #[cfg(feature = "llama")]
+    pub model: Option<llama_cpp_2::model::LlamaModel>,
+}
+
+impl LlamaEngine {
+    pub fn new(_name: &str, vram_gb: f64) -> Self {
+        Self {
+            vram_gb,
+            inner: Arc::new(Mutex::new(Inner {
+                on_bench: false,
+                path: None,
+                #[cfg(feature = "llama")]
+                model: None,
+            })),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().expect("llama engine mutex")
+    }
+
+    fn stored_path(&self) -> Result<String, EngineError> {
+        self.lock().path.clone().ok_or(EngineError::NotLoaded)
+    }
+}
+
+#[async_trait]
+impl Engine for LlamaEngine {
+    async fn warm(&self, path: &str) -> Result<(), EngineError> {
+        place_model(self, path, false).await
+    }
+
+    async fn load(&self, path: &str) -> Result<(), EngineError> {
+        place_model(self, path, true).await
+    }
+
+    async fn wake(&self) -> Result<(), EngineError> {
+        let path = self.stored_path()?;
+        place_model(self, &path, true).await
+    }
+
+    async fn sleep(&self) -> Result<(), EngineError> {
+        let path = self.stored_path()?;
+        place_model(self, &path, false).await
+    }
+
+    async fn discard(&self) -> Result<(), EngineError> {
+        let mut inner = self.lock();
+        inner.on_bench = false;
+        #[cfg(feature = "llama")]
+        {
+            inner.model = None;
+        }
+        Ok(())
+    }
+
+    async fn run(
+        &self,
+        prompt: &str,
+        cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<String>, EngineError> {
+        start_run(self, prompt, cancel)
+    }
+
+    fn measured_vram_gb(&self) -> f64 {
+        self.vram_gb
+    }
+}
+
+#[cfg(feature = "llama")]
+async fn place_model(engine: &LlamaEngine, path: &str, bench: bool) -> Result<(), EngineError> {
+    cpp::place(Arc::clone(&engine.inner), path.to_string(), bench).await
+}
+
+#[cfg(not(feature = "llama"))]
+async fn place_model(engine: &LlamaEngine, path: &str, bench: bool) -> Result<(), EngineError> {
+    let _ = (engine, path);
+    if bench {
+        refuse_without_feature()
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "llama")]
+fn start_run(
+    engine: &LlamaEngine,
+    prompt: &str,
+    cancel: CancellationToken,
+) -> Result<mpsc::Receiver<String>, EngineError> {
+    cpp::start_run(Arc::clone(&engine.inner), prompt.to_string(), cancel)
+}
+
+#[cfg(not(feature = "llama"))]
+fn start_run(
+    engine: &LlamaEngine,
+    prompt: &str,
+    cancel: CancellationToken,
+) -> Result<mpsc::Receiver<String>, EngineError> {
+    let _ = (engine, prompt, cancel);
+    refuse_without_feature()
+}
+
+#[cfg(not(feature = "llama"))]
+fn refuse_without_feature<T>() -> Result<T, EngineError> {
+    Err(EngineError::Other(NO_FEATURE.into()))
+}
+
+#[cfg(all(test, feature = "llama"))]
+mod llama_feature_tests {
+    use super::*;
+    use crate::Engine;
+
+    #[tokio::test]
+    async fn llama_rejects_missing_file() {
+        let e = LlamaEngine::new("soap", 1.0);
+        let err = e.load("/no/such/model.gguf").await.unwrap_err();
+        assert!(matches!(err, EngineError::Other(_)));
+    }
+}
+
+#[cfg(all(test, not(feature = "llama")))]
+mod llama_stub_tests {
+    use super::*;
+    use crate::Engine;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn load_fails_without_feature() {
+        let e = LlamaEngine::new("soap", 1.0);
+        let err = e.load("/no/such/model.gguf").await.unwrap_err();
+        match err {
+            EngineError::Other(msg) => assert!(msg.contains("llama")),
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_fails_without_feature() {
+        let e = LlamaEngine::new("soap", 1.0);
+        let err = e.run("hello", CancellationToken::new()).await.unwrap_err();
+        match err {
+            EngineError::Other(msg) => assert!(msg.contains("llama")),
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+}
