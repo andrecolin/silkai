@@ -77,10 +77,7 @@ impl Scheduler {
     }
 
     fn accept(&mut self, job_id: JobId, spec: ModelSpec) -> SubmitResult {
-        if let Some(actions) = self.try_place(job_id, &spec) {
-            return accepted(job_id, actions);
-        }
-        if let Some(actions) = self.preempt_and_place(job_id, &spec) {
+        if let Some(actions) = self.place_or_preempt(job_id, &spec) {
             return accepted(job_id, actions);
         }
         self.queue.push_back((job_id, spec.name));
@@ -120,12 +117,24 @@ impl Scheduler {
             let Some(spec) = self.models.get(&name).cloned() else {
                 continue;
             };
-            if let Some(acts) = self.try_place(job_id, &spec) {
-                self.queue.remove(i);
-                return Some(acts);
-            }
+            let Some(acts) = self.place_or_preempt(job_id, &spec) else {
+                continue;
+            };
+            self.remove_queued(job_id);
+            return Some(acts);
         }
         None
+    }
+
+    fn place_or_preempt(&mut self, job_id: JobId, spec: &ModelSpec) -> Option<Vec<Action>> {
+        self.try_place(job_id, spec)
+            .or_else(|| self.preempt_and_place(job_id, spec))
+    }
+
+    fn remove_queued(&mut self, job_id: JobId) {
+        if let Some(i) = self.queue.iter().position(|(id, _)| *id == job_id) {
+            self.queue.remove(i);
+        }
     }
 
     fn preempt_and_place(&mut self, job_id: JobId, spec: &ModelSpec) -> Option<Vec<Action>> {

@@ -32,12 +32,12 @@ fn finishing_whisper_and_scan_allows_queued_soap() {
     let w = job_id(s.submit("whisper"));
     let c = job_id(s.submit("chart-scan"));
     s.submit("soap");
-    s.finish(w);
-    assert_eq!(s.queued("soap"), 1);
-    let actions = s.finish(c);
+    let actions = s.finish(w);
     assert!(actions.iter().any(|a| matches!(
         a,
         Action::Start { model, .. } if model == "soap"
     )));
+    assert_eq!(s.queued("soap"), 0);
     assert_eq!(s.tier("soap"), silkai_sched::Tier::Bench);
+    assert!(s.finish(c).is_empty());
 }

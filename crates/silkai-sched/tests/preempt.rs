@@ -112,3 +112,37 @@ fn preempted_soap_restarts_after_whisper_finishes() {
         Action::Start { model, job_id, .. } if model == "soap" && *job_id == soap_id
     )));
 }
+
+#[test]
+fn queued_exclusive_is_admitted_by_preempting_background_when_live_ends() {
+    let mut s = sched();
+    let w = job_id(s.submit("whisper"));
+    let _scan = job_id(s.submit("chart-scan"));
+    let soap_id = job_id(s.submit("soap"));
+    assert_eq!(s.queued("soap"), 1);
+    let actions = s.finish(w);
+    assert!(actions.iter().any(|a| matches!(a, Action::Preempt { .. })));
+    assert!(actions.iter().any(|a| matches!(
+        a,
+        Action::Start { model, job_id, .. } if model == "soap" && *job_id == soap_id
+    )));
+}
+
+#[test]
+fn later_soap_submit_does_not_jump_queued_soap() {
+    let mut s = sched();
+    let w = job_id(s.submit("whisper"));
+    let _scan = job_id(s.submit("chart-scan"));
+    let soap_a = job_id(s.submit("soap"));
+    s.finish(w); // should start soap_a by preempting scan
+    let soap_b = s.submit("soap");
+    match soap_b {
+        SubmitResult::Accepted { job_id, actions } => {
+            assert_ne!(job_id, soap_a);
+            assert!(!actions.iter().any(|a| matches!(a, Action::Start { .. })));
+        }
+        _ => panic!("queued"),
+    }
+    assert_eq!(s.running("soap"), 1);
+    assert_eq!(s.queued("soap"), 1);
+}
