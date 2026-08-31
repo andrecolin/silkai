@@ -1,8 +1,8 @@
 # SilkAI GPU Capacity Scheduler
 
-A local daemon that owns one machine’s GPU memory and runs multiple models
-by packing, priority, and warm RAM residency. Apps talk HTTP or WebSocket.
-They never allocate GPU memory themselves.
+A local daemon that owns a machine’s GPU memory — one card or several — and
+runs multiple models by packing, priority, and warm RAM residency. Apps talk
+HTTP or WebSocket. They never allocate GPU memory themselves.
 
 ## Problem
 
@@ -18,7 +18,10 @@ The machine’s desktop also needs a slice of VRAM or the display hitches.
 ## Goals
 
 - One process on the machine is the only GPU owner for these models.
-- If models fit, they run together. If they do not, they queue or evict by policy.
+- If models fit **on a given GPU**, they run together. If they do not, they queue
+  or evict by policy. Several GPUs are several benches, one shared RAM shelf.
+- An ~80% VRAM model and an ~30% VRAM model run at the same time **when they
+  land on different GPUs**. On the same GPU they still do not fit (110%).
 - After first load, a model used again comes from RAM (about 1–3 seconds), not disk.
 - Live dictation is never bumped while a session is open.
 - Exclusive models (large SOAP-style generators) run alone.
@@ -29,7 +32,7 @@ The machine’s desktop also needs a slice of VRAM or the display hitches.
 
 - Transparent interception of foreign CUDA/Vulkan processes (Nixie-style).
 - Replacing Whisper, llama.cpp, or vLLM kernels.
-- Multi-machine / cluster scheduling.
+- Multi-machine / cluster scheduling (several GPUs in **one** box are in scope).
 - Claiming 100% of VRAM (desktop always keeps a reserved slice).
 - A kernel module or CUDA virtual-memory hypervisor.
 - Windows/macOS installers in the first slice (design must not block them).
@@ -39,14 +42,23 @@ The machine’s desktop also needs a slice of VRAM or the display hitches.
 
 - Clinic / small-business box: two doctors dictating, SOAP notes after, chart
   scan in the gaps.
-- Power user running several local models on one card.
+- Power user running several local models on one card, or a small server with
+  two or more GPUs.
 
-Example machine used throughout this spec:
+Example machine used throughout this spec (single GPU):
 
 - GPU 32 GB, leave 3 GB for the desktop → **29 GB schedulable**
 - RAM 128 GB, leave 32 GB for the OS → **96 GB shelf**
 - Models: Whisper 12 GB live shareable 2 slots; SOAP 28 GB exclusive 1 slot;
   chart-scan 10 GB background shareable 1 slot
+
+Example machine (two GPUs) — required, not yet implemented in slice 1:
+
+- GPU 0 and GPU 1, 32 GB each, 3 GB headroom each → **29 GB schedulable per card**
+- Same 128 GB RAM shelf for all warm copies
+- Large writer ~80% of one card (~26 GB) on GPU 0; indexer ~30% (~10 GB) on
+  GPU 1; both resident at once. Exclusive means **that card** is alone, not
+  the whole machine.
 
 ## Alternatives
 
@@ -167,13 +179,42 @@ transport = "http"
 | `path` | Cupboard (disk) |
 | `vram_gb` | Cost of having this model **resident** with up to `slots` jobs. Trusted up front. First real load may log a warning if measured use differs by >10% |
 | `priority` | `live` > `normal` > `background` |
-| `exclusive` | Resident only when no other model is resident |
+| `exclusive` | Resident only when no other model is resident **on the same GPU** |
+| `gpu` | Optional device pin (`0`, `1`, …). Omit = place on any GPU that has room |
 | `slots` | Max concurrent jobs on that one resident copy. Extra jobs queue on the model (async accept, sequential or N-way run) |
 | `keep_warm` | On GPU unload, keep weights in RAM (shelf) |
 | `transport` | How clients should connect; server may still expose HTTP file-upload for a `websocket` model |
 | `idle_timeout_secs` | WebSocket only; missing audio/heartbeat releases the slot |
 
-`gpu_schedulable = gpu_total_gb - gpu_headroom_gb`.
+`gpu_schedulable = gpu_total_gb - gpu_headroom_gb` on **each** GPU.
+
+Slice 1 config keeps a single `[resources] gpu_total_gb` (one bench). Multi-GPU
+config (later slice) lists devices:
+
+```toml
+[resources]
+ram_total_gb = 128
+ram_headroom_gb = 32
+
+[[resources.gpus]]
+id = 0
+total_gb = 32
+headroom_gb = 3
+
+[[resources.gpus]]
+id = 1
+total_gb = 32
+headroom_gb = 3
+
+[models.write]
+vram_gb = 26          # ~80% of 32 GB
+exclusive = true      # GPU 0 alone; GPU 1 still free
+# gpu = 0             # optional pin; default: first GPU that fits
+
+[models.index]
+vram_gb = 10          # ~30% of 32 GB
+exclusive = false
+```
 
 Shelf budget = total RAM − `ram_headroom_gb`. If keep-warm copies would exceed
 it, demote least-recently-used warm model to disk (cupboard).
@@ -187,6 +228,29 @@ resident model forces sleep then load on next job.
 The scheduler is a pure function of: config, resident set, running jobs, queue.
 Adapters execute decisions. Unit tests do not need a GPU: they use a fake
 adapter and a numeric GB budget.
+
+### Multiple GPUs (requirement)
+
+Each physical GPU is its own **bench** with its own schedulable GB. System RAM
+is still **one shelf** for all warm copies.
+
+| Placement | Fits? |
+|---|---|
+| Model A 80% and model B 30% on **one** GPU | No (110%). Queue or evict as today. |
+| Model A 80% on GPU 0, model B 30% on GPU 1 | Yes. Both resident. No swap. |
+| Exclusive model on GPU 0 | GPU 0 has no neighbors. GPU 1 may still run others. |
+| Live model pinned to a GPU | That card does not evict it while the session is open. Other cards may run writers. |
+
+Default placement: pack onto the first GPU with enough free VRAM (and exclusive
+rules). Optional `gpu = N` pins the model.
+
+**Not in the first multi-GPU slice:** one model **split across** cards (llama.cpp
+layer/tensor split occupying GPU 0 and 1 together). That is a later occupancy
+type (“this job holds a set of devices”). Until then, each model maps to **one**
+GPU.
+
+Slice 1 implementation stays a single `gpu_schedulable_gb`. Multi-GPU packing
+is a required later slice, not an optional extra.
 
 ### Tiers
 
@@ -416,6 +480,8 @@ Scheduler tests (no GPU, fake adapter, numeric GB):
 - Exclusive arrival evicts idle neighbors and preempts `background`.
 - Shelf demote when warm copies exceed RAM budget.
 - Prefetch does not occupy the bench.
+- (Later slice) 80%+30% fail on one GPU budget; succeed when assigned to two
+  GPU budgets. Exclusive on GPU 0 does not evict a resident on GPU 1.
 
 Server tests (slice 1): HTTP SSE queue comments; `/v1/status` reflects resident/shelf.
 
@@ -441,8 +507,15 @@ whisper.cpp + WebSocket dictation, live preemption, idle timeout.
 
 ### Slice 3
 
+Multiple GPUs: N benches, one RAM shelf; per-GPU packing; optional `gpu` pin;
+exclusive is per card. Prove 80%+30% colocated on two devices and rejected on
+one. Status JSON lists resident GPU per model.
+
+### Slice 4
+
 Optional vLLM adapter; Vulkan build matrix; `/v1/audio/transcriptions` file path
-if not done in slice 2; KV resume after preemption.
+if not done in slice 2; KV resume after preemption; one model spanning several
+GPUs (layer/tensor split).
 
 ## Key decisions
 
@@ -459,9 +532,13 @@ if not done in slice 2; KV resume after preemption.
 8. **Preempted generate restarts from the prompt in v1.** Avoids KV snapshot
    complexity.
 9. **Localhost only.** This is a workstation agent.
-10. **Desktop headroom is first-class.** Never schedule to 100% VRAM.
+10. **Desktop headroom is first-class.** Never schedule to 100% of a GPU.
 11. **MIT, public GitHub, optional coffee.** Validated then released; no paid
     gate. Donation is a README link only.
+12. **Several GPUs are several benches, one RAM shelf.** 80% + 30% on one card
+    still fails; on two cards they both stay loaded. Exclusive is per GPU.
+    Slice 1 is one bench; multi-GPU is a required follow-on, not a different
+    product. One model split across cards is later than simple placement.
 
 ## Open questions (resolved in conversation)
 
@@ -471,3 +548,5 @@ if not done in slice 2; KV resume after preemption.
 - Transport: Whisper WebSocket, SOAP HTTP. **Resolved.**
 - Linux first, portable scheduler. **Resolved.**
 - 128 GB RAM → all sample models stay warm. **Resolved.**
+- Multi-GPU: N benches, one shelf; 80%+30% on different cards. **Resolved
+  (requirement). Slice 1 remains single-GPU; implement in slice 3.**
