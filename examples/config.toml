@@ -11,10 +11,11 @@ ram_headroom_gb = 32
 prefetch_on_start = true
 request_timeout_secs = 600
 
-[models.whisper]
+# Live speech-to-text: two people can share this copy.
+[models.transcribe]
 engine = "fake"
 # engine = "llama.cpp"
-path = "/models/whisper.bin"
+path = "/models/transcribe.bin"
 vram_gb = 12
 priority = "live"
 exclusive = false
@@ -22,10 +23,11 @@ slots = 2
 keep_warm = true
 transport = "http"
 
-[models.soap]
+# Large writer: needs the GPU to itself (summaries, emails, long answers).
+[models.write]
 engine = "fake"
 # engine = "llama.cpp"
-path = "/models/soap-q4.gguf"
+path = "/models/write-q4.gguf"
 vram_gb = 28
 priority = "normal"
 exclusive = true
@@ -33,10 +35,11 @@ slots = 1
 keep_warm = true
 transport = "http"
 
-[models.chart-scan]
+# Small indexer / tagger: runs in leftover space only.
+[models.index]
 engine = "fake"
 # engine = "llama.cpp"
-path = "/models/chart-scan-q4.gguf"
+path = "/models/index-q4.gguf"
 vram_gb = 10
 priority = "background"
 exclusive = false
