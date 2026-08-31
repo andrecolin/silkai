@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::time::Duration;
 
 use silkai_adapters::{Engine, EngineError, FakeEngine};
 use silkai_sched::{
@@ -37,6 +38,7 @@ struct Inner {
     cancels: Mutex<HashMap<JobId, CancellationToken>>,
     apply_tx: mpsc::UnboundedSender<Vec<Action>>,
     apply_rx: Mutex<Option<mpsc::UnboundedReceiver<Vec<Action>>>>,
+    request_timeout: Duration,
 }
 
 impl Inner {
@@ -52,6 +54,7 @@ impl Inner {
             cancels: Mutex::new(HashMap::new()),
             apply_tx,
             apply_rx: Mutex::new(Some(apply_rx)),
+            request_timeout: cfg.request_timeout,
         }
     }
 }
@@ -86,6 +89,10 @@ impl Runtime {
 
     pub fn status(&self) -> StatusSnapshot {
         self.inner.snapshot.lock().expect("status mutex").clone()
+    }
+
+    pub fn request_timeout(&self) -> Duration {
+        self.inner.request_timeout
     }
 
     pub fn configured_models(&self) -> Vec<String> {

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use silkai_sched::clinic::{clinic_models, clinic_resources};
 use silkai_sched::{ModelSpec, Priority};
 use silkai_server::config::{AppConfig, ConfiguredModel};
@@ -18,6 +20,7 @@ fn clinic_cfg() -> AppConfig {
         listen: "127.0.0.1:0".into(),
         prefetch_on_start: true,
         request_timeout_secs: 600,
+        request_timeout: Duration::from_secs(600),
         resources: clinic_resources(),
         enabled: models,
         disabled: vec![],

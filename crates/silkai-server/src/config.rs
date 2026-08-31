@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde::Deserialize;
 use silkai_sched::{ModelSpec, Priority, Resources};
@@ -8,6 +9,7 @@ pub struct AppConfig {
     pub listen: String,
     pub prefetch_on_start: bool,
     pub request_timeout_secs: u64,
+    pub request_timeout: Duration,
     pub resources: Resources,
     pub enabled: Vec<ConfiguredModel>,
     pub disabled: Vec<ConfiguredModel>,
@@ -83,6 +85,7 @@ fn app_config(file: FileConfig) -> Result<AppConfig, ConfigError> {
         listen: file.listen,
         prefetch_on_start: file.resources.prefetch_on_start,
         request_timeout_secs: file.resources.request_timeout_secs,
+        request_timeout: Duration::from_secs(file.resources.request_timeout_secs),
         resources,
         enabled,
         disabled,
