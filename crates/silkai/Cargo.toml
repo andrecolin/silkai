@@ -1,0 +1,11 @@
+[package]
+name = "silkai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+silkai-server = { path = "../silkai-server" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing-subscriber = "0.3"

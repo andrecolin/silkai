@@ -1,0 +1,45 @@
+# Copy to ~/.config/silkai/config.toml, or set SILKAI_CONFIG.
+# Slice 1 uses engine = "fake" so the daemon runs without a GPU.
+
+listen = "127.0.0.1:8080"
+
+[resources]
+gpu_total_gb = 32
+gpu_headroom_gb = 3
+ram_total_gb = 128
+ram_headroom_gb = 32
+prefetch_on_start = true
+request_timeout_secs = 600
+
+[models.whisper]
+engine = "fake"
+# engine = "llama.cpp"
+path = "/models/whisper.bin"
+vram_gb = 12
+priority = "live"
+exclusive = false
+slots = 2
+keep_warm = true
+transport = "http"
+
+[models.soap]
+engine = "fake"
+# engine = "llama.cpp"
+path = "/models/soap-q4.gguf"
+vram_gb = 28
+priority = "normal"
+exclusive = true
+slots = 1
+keep_warm = true
+transport = "http"
+
+[models.chart-scan]
+engine = "fake"
+# engine = "llama.cpp"
+path = "/models/chart-scan-q4.gguf"
+vram_gb = 10
+priority = "background"
+exclusive = false
+slots = 1
+keep_warm = true
+transport = "http"
