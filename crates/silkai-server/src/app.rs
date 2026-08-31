@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,12 +15,22 @@ use silkai_sched::clinic::{clinic_models, clinic_resources};
 use silkai_sched::{JobId, ModelSpec, Priority, StatusSnapshot};
 use tokio::sync::mpsc;
 
-use crate::config::{AppConfig, ConfiguredModel};
+use crate::config::{load_from_path, AppConfig, ConfigError, ConfiguredModel};
 use crate::runtime::{Runtime, RuntimeError};
 
+struct AppState {
+    config_path: Option<PathBuf>,
+    runtime: tokio::sync::RwLock<Arc<Runtime>>,
+}
+
 pub async fn app_from_config(cfg: AppConfig) -> Router {
-    let rt = Runtime::new(cfg).await.expect("runtime");
-    router(Arc::new(rt))
+    router(None, build_runtime(cfg).await)
+}
+
+pub async fn app_from_path(path: impl AsRef<Path>) -> Result<Router, ConfigError> {
+    let path = path.as_ref().to_path_buf();
+    let cfg = load_from_path(&path)?;
+    Ok(router(Some(path), build_runtime(cfg).await))
 }
 
 pub async fn test_app() -> Router {
@@ -38,25 +49,42 @@ pub async fn test_app_timeout_ms(ms: u64) -> Router {
     app_from_config(cfg).await
 }
 
-fn router(rt: Arc<Runtime>) -> Router {
+async fn build_runtime(cfg: AppConfig) -> Runtime {
+    Runtime::new(cfg).await.expect("runtime")
+}
+
+fn router(config_path: Option<PathBuf>, rt: Runtime) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(list_models))
         .route("/v1/status", get(status))
         .route("/v1/chat/completions", post(chat_completions))
-        .with_state(rt)
+        .route("/admin/reload", post(reload))
+        .with_state(state_for(config_path, rt))
+}
+
+fn state_for(config_path: Option<PathBuf>, rt: Runtime) -> Arc<AppState> {
+    Arc::new(AppState {
+        config_path,
+        runtime: tokio::sync::RwLock::new(Arc::new(rt)),
+    })
 }
 
 async fn health() -> &'static str {
     "ok"
 }
 
-async fn list_models(State(rt): State<Arc<Runtime>>) -> Json<ModelList> {
+async fn runtime_of(state: &AppState) -> Arc<Runtime> {
+    state.runtime.read().await.clone()
+}
+
+async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelList> {
+    let rt = runtime_of(&state).await;
     Json(ModelList::from_names(rt.configured_models()))
 }
 
-async fn status(State(rt): State<Arc<Runtime>>) -> Json<StatusSnapshot> {
-    Json(rt.status())
+async fn status(State(state): State<Arc<AppState>>) -> Json<StatusSnapshot> {
+    Json(runtime_of(&state).await.status())
 }
 
 #[derive(Deserialize)]
@@ -75,13 +103,42 @@ struct ChatMessage {
 }
 
 async fn chat_completions(
-    State(rt): State<Arc<Runtime>>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
 ) -> Response {
+    let rt = runtime_of(&state).await;
     match rt.submit_chat(&req.model, prompt_of(&req)).await {
         Ok((job, rx)) => finish_chat(&rt, job, rx, req.stream).await,
         Err(err) => chat_error(err).into_response(),
     }
+}
+
+async fn reload(State(state): State<Arc<AppState>>) -> StatusCode {
+    let Some(path) = state.config_path.clone() else {
+        return StatusCode::BAD_REQUEST;
+    };
+    match load_from_path(path) {
+        Ok(cfg) => swap_if_idle(&state, cfg).await,
+        Err(_) => StatusCode::BAD_REQUEST,
+    }
+}
+
+async fn swap_if_idle(state: &AppState, cfg: AppConfig) -> StatusCode {
+    let mut slot = state.runtime.write().await;
+    if running_jobs(&slot) > 0 {
+        return StatusCode::CONFLICT;
+    }
+    match Runtime::new(cfg).await {
+        Ok(rt) => {
+            *slot = Arc::new(rt);
+            StatusCode::OK
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn running_jobs(rt: &Runtime) -> u32 {
+    rt.status().models.iter().map(|m| m.running).sum()
 }
 
 fn prompt_of(req: &ChatRequest) -> &str {

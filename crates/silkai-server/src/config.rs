@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -28,6 +29,8 @@ pub struct ConfiguredModel {
 pub enum ConfigError {
     #[error(transparent)]
     Toml(#[from] toml::de::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
     #[error("{0}")]
     Invalid(String),
 }
@@ -76,6 +79,10 @@ struct FileModel {
 pub fn load_from_str(s: &str) -> Result<AppConfig, ConfigError> {
     let file: FileConfig = toml::from_str(s)?;
     app_config(file)
+}
+
+pub fn load_from_path(path: impl AsRef<Path>) -> Result<AppConfig, ConfigError> {
+    load_from_str(&std::fs::read_to_string(path)?)
 }
 
 fn app_config(file: FileConfig) -> Result<AppConfig, ConfigError> {
