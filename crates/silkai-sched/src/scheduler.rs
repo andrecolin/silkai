@@ -1,7 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::types::{
-    Action, JobId, ModelSpec, Priority, RejectReason, Resources, SubmitResult, Tier,
+    Action, JobId, ModelSpec, ModelStatus, Priority, RejectReason, Resources, StatusSnapshot,
+    SubmitResult, Tier,
 };
 
 #[derive(Debug)]
@@ -81,6 +82,33 @@ impl Scheduler {
 
     pub fn queued(&self, model: &str) -> u32 {
         self.queue.iter().filter(|(_, name)| name == model).count() as u32
+    }
+
+    pub fn status(&self) -> StatusSnapshot {
+        StatusSnapshot {
+            models: self.model_statuses(),
+            gpu_used_gb: self.gpu_used_gb(),
+            ram_used_gb: self.ram_used_gb(),
+        }
+    }
+
+    fn model_statuses(&self) -> Vec<ModelStatus> {
+        let mut models: Vec<ModelStatus> = self
+            .models
+            .keys()
+            .map(|name| self.model_status(name))
+            .collect();
+        models.sort_by(|a, b| a.name.cmp(&b.name));
+        models
+    }
+
+    fn model_status(&self, name: &str) -> ModelStatus {
+        ModelStatus {
+            name: name.to_string(),
+            tier: self.tier(name),
+            running: self.running(name),
+            queued: self.queued(name),
+        }
     }
 
     pub fn submit(&mut self, model: &str) -> SubmitResult {
