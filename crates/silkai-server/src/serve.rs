@@ -1,17 +1,22 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 
 use tokio::net::TcpListener;
 
-use crate::app::app_from_config;
+use crate::app::app_from_config_path;
 use crate::config::AppConfig;
 
-pub async fn serve(cfg: AppConfig) -> anyhow::Result<()> {
+pub async fn serve(cfg: AppConfig, config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let listener = TcpListener::bind(local_listen_addr(&cfg.listen)?).await?;
-    serve_listener(listener, cfg).await
+    serve_listener(listener, cfg, config_path).await
 }
 
-pub async fn serve_listener(listener: TcpListener, cfg: AppConfig) -> anyhow::Result<()> {
-    axum::serve(listener, app_from_config(cfg).await).await?;
+pub async fn serve_listener(
+    listener: TcpListener,
+    cfg: AppConfig,
+    config_path: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    axum::serve(listener, app_from_config_path(cfg, config_path).await).await?;
     Ok(())
 }
 

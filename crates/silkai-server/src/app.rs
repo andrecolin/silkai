@@ -24,13 +24,17 @@ struct AppState {
 }
 
 pub async fn app_from_config(cfg: AppConfig) -> Router {
-    router(None, build_runtime(cfg).await)
+    app_from_config_path(cfg, None).await
 }
 
 pub async fn app_from_path(path: impl AsRef<Path>) -> Result<Router, ConfigError> {
     let path = path.as_ref().to_path_buf();
     let cfg = load_from_path(&path)?;
-    Ok(router(Some(path), build_runtime(cfg).await))
+    Ok(app_from_config_path(cfg, Some(path)).await)
+}
+
+pub async fn app_from_config_path(cfg: AppConfig, config_path: Option<PathBuf>) -> Router {
+    router(config_path, build_runtime(cfg).await)
 }
 
 pub async fn test_app() -> Router {

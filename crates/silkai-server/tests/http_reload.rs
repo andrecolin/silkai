@@ -161,3 +161,22 @@ fn soap_only_toml() -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+#[tokio::test]
+async fn reload_via_serve_listener_idle_ok() {
+    let (_dir, path) = write_config(VALID_TOML);
+    let cfg = silkai_server::config::load_from_path(&path).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        silkai_server::serve_listener(listener, cfg, Some(path))
+            .await
+            .unwrap();
+    });
+    let res = reqwest::Client::new()
+        .post(format!("http://{addr}/admin/reload"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+}

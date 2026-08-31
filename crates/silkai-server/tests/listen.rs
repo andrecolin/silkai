@@ -29,7 +29,7 @@ async fn health_via_tcp() {
     let addr = listener.local_addr().unwrap();
     let cfg = clinic_cfg();
     tokio::spawn(async move {
-        serve_listener(listener, cfg).await.unwrap();
+        serve_listener(listener, cfg, None).await.unwrap();
     });
     let body = reqwest::get(format!("http://{addr}/health"))
         .await

@@ -98,6 +98,26 @@ async fn llama_cpp_submit_unavailable_without_feature() {
     );
 }
 
+fn nope_soap_cfg() -> AppConfig {
+    let mut cfg = clinic_cfg();
+    for model in &mut cfg.enabled {
+        if model.spec.name == "soap" {
+            model.engine = "nope".into();
+        }
+    }
+    cfg
+}
+
+#[tokio::test]
+async fn unknown_engine_submit_unavailable() {
+    let rt = Runtime::new(nope_soap_cfg()).await.unwrap();
+    let err = rt.submit_chat("soap", "x").await.unwrap_err();
+    assert!(
+        matches!(err, RuntimeError::Unavailable),
+        "expected Unavailable, got {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn stream_end_then_live_submit_does_not_panic() {
     let rt = Runtime::new(clinic_cfg()).await.unwrap();

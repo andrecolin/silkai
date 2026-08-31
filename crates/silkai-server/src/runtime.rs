@@ -123,7 +123,12 @@ impl Runtime {
 
 impl Runtime {
     fn assemble(cfg: AppConfig) -> Result<(Self, Vec<Action>), RuntimeError> {
-        let specs = cfg.enabled.iter().map(|m| m.spec.clone()).collect();
+        let specs = cfg
+            .enabled
+            .iter()
+            .filter(|m| known_engine(&m.engine))
+            .map(|m| m.spec.clone())
+            .collect();
         let mut scheduler = Scheduler::new(cfg.resources.clone(), specs).map_err(sched_err)?;
         let warmup = prefetch_actions(&mut scheduler, cfg.prefetch_on_start);
         let rt = Self {
@@ -388,16 +393,23 @@ fn prefetch_actions(scheduler: &mut Scheduler, prefetch: bool) -> Vec<Action> {
 fn engines_for(models: &[ConfiguredModel]) -> HashMap<String, Arc<dyn Engine>> {
     models
         .iter()
-        .map(|m| (m.spec.name.clone(), arc_engine(m)))
+        .filter_map(|m| Some((m.spec.name.clone(), arc_engine(m)?)))
         .collect()
 }
 
-fn arc_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {
-    if model.engine == "llama.cpp" {
-        llama_engine(model)
-    } else {
-        Arc::new(FakeEngine::new(&model.spec.name, model.spec.vram_gb))
+fn arc_engine(model: &ConfiguredModel) -> Option<Arc<dyn Engine>> {
+    match model.engine.as_str() {
+        "fake" => Some(Arc::new(FakeEngine::new(
+            &model.spec.name,
+            model.spec.vram_gb,
+        ))),
+        "llama.cpp" => Some(llama_engine(model)),
+        _ => None,
     }
+}
+
+fn known_engine(engine: &str) -> bool {
+    matches!(engine, "fake" | "llama.cpp")
 }
 
 fn llama_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {
@@ -418,9 +430,17 @@ fn warn_missing_llama() {
 fn unavailable_set(models: &[ConfiguredModel]) -> HashSet<String> {
     models
         .iter()
-        .filter(|m| m.engine == "llama.cpp" && !cfg!(feature = "llama"))
+        .filter(|m| !engine_available(&m.engine))
         .map(|m| m.spec.name.clone())
         .collect()
+}
+
+fn engine_available(engine: &str) -> bool {
+    match engine {
+        "fake" => true,
+        "llama.cpp" => cfg!(feature = "llama"),
+        _ => false,
+    }
 }
 
 fn engine_err(err: EngineError) -> RuntimeError {
