@@ -73,15 +73,18 @@ impl Scheduler {
             return rejected(RejectReason::TooLarge);
         }
         let job_id = self.alloc_id();
+        self.accept(job_id, spec)
+    }
+
+    fn accept(&mut self, job_id: JobId, spec: ModelSpec) -> SubmitResult {
         if let Some(actions) = self.try_place(job_id, &spec) {
-            SubmitResult::Accepted { job_id, actions }
-        } else {
-            self.queue.push_back((job_id, spec.name));
-            SubmitResult::Accepted {
-                job_id,
-                actions: vec![],
-            }
+            return accepted(job_id, actions);
         }
+        if let Some(actions) = self.preempt_and_place(job_id, &spec) {
+            return accepted(job_id, actions);
+        }
+        self.queue.push_back((job_id, spec.name));
+        accepted(job_id, vec![])
     }
 
     pub fn finish(&mut self, job_id: JobId) -> Vec<Action> {
@@ -123,6 +126,122 @@ impl Scheduler {
             }
         }
         None
+    }
+
+    fn preempt_and_place(&mut self, job_id: JobId, spec: &ModelSpec) -> Option<Vec<Action>> {
+        if !self.should_preempt(spec) {
+            return None;
+        }
+        let victims = self.preempt_victim_models(&spec.name);
+        let mut actions = self.preempt_models(&victims);
+        actions.extend(self.try_place(job_id, spec)?);
+        Some(actions)
+    }
+
+    fn should_preempt(&self, spec: &ModelSpec) -> bool {
+        self.may_preempt(spec)
+            && !self.preempt_victim_models(&spec.name).is_empty()
+            && self.can_place_after_preempt(spec)
+    }
+
+    fn may_preempt(&self, spec: &ModelSpec) -> bool {
+        match spec.priority {
+            Priority::Live => self.has_slot(spec),
+            Priority::Background => false,
+            Priority::Normal => spec.exclusive && !self.has_running_live() && self.has_slot(spec),
+        }
+    }
+
+    fn has_slot(&self, spec: &ModelSpec) -> bool {
+        self.tier(&spec.name) != Tier::Bench || self.running(&spec.name) < spec.slots
+    }
+
+    fn has_running_live(&self) -> bool {
+        self.models
+            .values()
+            .any(|m| m.priority == Priority::Live && self.running(&m.name) > 0)
+    }
+
+    fn can_place_after_preempt(&self, spec: &ModelSpec) -> bool {
+        let stuck = self.immovable_bench(&spec.name);
+        if spec.exclusive && !stuck.is_empty() {
+            return false;
+        }
+        if stuck.iter().any(|n| self.is_exclusive(n)) {
+            return false;
+        }
+        let used: f64 = stuck.iter().map(|n| self.vram_gb(n)).sum();
+        used + self.added_vram(spec) <= self.resources.gpu_schedulable_gb
+    }
+
+    fn added_vram(&self, spec: &ModelSpec) -> f64 {
+        if self.tier(&spec.name) == Tier::Bench {
+            0.0
+        } else {
+            spec.vram_gb
+        }
+    }
+
+    fn immovable_bench(&self, incoming: &str) -> Vec<String> {
+        self.bench_names_except(incoming)
+            .into_iter()
+            .filter(|n| self.running(n) > 0 && self.priority_of(n) == Priority::Live)
+            .collect()
+    }
+
+    fn preempt_victim_models(&self, incoming: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .bench_names_except(incoming)
+            .into_iter()
+            .filter(|n| self.running(n) > 0 && self.priority_of(n) != Priority::Live)
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn preempt_models(&mut self, models: &[String]) -> Vec<Action> {
+        let mut actions = Vec::new();
+        for name in models {
+            actions.extend(self.preempt_model(name));
+        }
+        actions
+    }
+
+    fn preempt_model(&mut self, name: &str) -> Vec<Action> {
+        let ids = self.running_job_ids(name);
+        let mut actions = self.take_running_jobs(&ids);
+        self.requeue_front(name, &ids);
+        actions.push(self.sleep_or_discard(name));
+        actions
+    }
+
+    fn take_running_jobs(&mut self, ids: &[JobId]) -> Vec<Action> {
+        ids.iter()
+            .map(|&job_id| {
+                self.jobs.remove(&job_id);
+                Action::Preempt { job_id }
+            })
+            .collect()
+    }
+
+    fn requeue_front(&mut self, name: &str, ids: &[JobId]) {
+        for &job_id in ids.iter().rev() {
+            self.queue.push_front((job_id, name.to_string()));
+        }
+        if let Some(n) = self.running.get_mut(name) {
+            *n = 0;
+        }
+    }
+
+    fn running_job_ids(&self, name: &str) -> Vec<JobId> {
+        let mut ids: Vec<JobId> = self
+            .jobs
+            .iter()
+            .filter(|(_, model)| *model == name)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
     }
 
     fn try_place(&mut self, job_id: JobId, spec: &ModelSpec) -> Option<Vec<Action>> {
@@ -374,6 +493,10 @@ fn index_models(models: Vec<ModelSpec>) -> Result<HashMap<String, ModelSpec>, Sc
 
 fn rejected(reason: RejectReason) -> SubmitResult {
     SubmitResult::Rejected { reason }
+}
+
+fn accepted(job_id: JobId, actions: Vec<Action>) -> SubmitResult {
+    SubmitResult::Accepted { job_id, actions }
 }
 
 fn start_action(job_id: JobId, model: &str) -> Action {
