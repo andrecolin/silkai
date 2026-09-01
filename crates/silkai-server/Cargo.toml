@@ -7,6 +7,9 @@ license.workspace = true
 [features]
 default = []
 llama = ["silkai-adapters/llama"]
+cuda = ["llama", "silkai-adapters/cuda"]
+vulkan = ["llama", "silkai-adapters/vulkan"]
+metal = ["llama", "silkai-adapters/metal"]
 
 [dependencies]
 anyhow = "1"

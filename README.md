@@ -64,8 +64,8 @@ disk.
 
 Slice 1 is a working **Linux** daemon (`127.0.0.1` only): scheduler, HTTP chat
 completions, fake engines (no GPU required), optional llama.cpp behind
-`--features llama`, and HTTP adapters for vLLM (`engine = "vllm"`) and Ollama
-(`engine = "ollama"`).
+`--features llama` (optional `cuda` / `vulkan` / `metal`), and HTTP adapters
+for vLLM (`engine = "vllm"`) and Ollama (`engine = "ollama"`).
 
 WebSocket is a **per-model** option (`transport = "websocket"` or `"both"`).
 Any configured model can take a session. An open socket holds that model’s
@@ -93,17 +93,23 @@ systemctl --user enable --now silkai
 curl -s http://127.0.0.1:8080/health
 ```
 
-llama.cpp (real GGUFs):
+llama.cpp (real GGUFs). `llama` is CPU; add one GPU backend:
 
 ```bash
 FEATURES=llama ./scripts/install.sh
+FEATURES=llama,cuda ./scripts/install.sh      # NVIDIA, needs CUDA toolkit
+FEATURES=llama,vulkan ./scripts/install.sh    # Linux/Windows, needs Vulkan SDK
+FEATURES=llama,metal ./scripts/install.sh     # macOS (often already on by llama.cpp)
 ```
+
+Pick **one** of `cuda`, `vulkan`, or `metal`. Do not pass `--all-features`.
 
 Without the script:
 
 ```bash
 cargo install --path crates/silkai --locked
 # optional: --features llama
+# GPU: --features llama,cuda | llama,vulkan | llama,metal
 mkdir -p ~/.config/silkai
 cp examples/config.toml ~/.config/silkai/config.toml
 silkai
@@ -149,7 +155,8 @@ the next model.
 See `examples/config.toml` for VRAM, `priority` (`live` | `normal` | `background`),
 `exclusive`, `slots`, and `keep_warm`.
 
-Build llama.cpp support with `cargo run -p silkai --features llama` and set
+Build llama.cpp support with `cargo run -p silkai --features llama` (CPU) or
+`--features llama,cuda` / `llama,vulkan` / `llama,metal`, and set
 `engine = "llama.cpp"` plus a GGUF `path` on that model.
 
 vLLM is an HTTP adapter, not a built-in runner. Start vLLM yourself (sleep
@@ -182,6 +189,7 @@ SilkAI does not spawn or stop Ollama.
 ```bash
 cargo test
 cargo test --features llama
+# GPU backends need the matching SDK; they are not part of `cargo test`.
 ```
 
 Scheduler tests are numeric GB; they do not need a GPU.

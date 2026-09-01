@@ -4,6 +4,9 @@
 #
 #   ./scripts/install.sh
 #   FEATURES=llama ./scripts/install.sh
+#   FEATURES=llama,cuda ./scripts/install.sh
+#   FEATURES=llama,vulkan ./scripts/install.sh
+#   FEATURES=llama,metal ./scripts/install.sh
 #   PREFIX=/usr/local ./scripts/install.sh
 set -euo pipefail
 

@@ -7,6 +7,9 @@ license.workspace = true
 [features]
 default = []
 llama = ["dep:llama-cpp-2"]
+cuda = ["llama", "llama-cpp-2/cuda"]
+vulkan = ["llama", "llama-cpp-2/vulkan"]
+metal = ["llama", "llama-cpp-2/metal"]
 
 [dependencies]
 async-trait = "0.1"

@@ -6,7 +6,9 @@ the repo (see `LICENSE`).
 ## Tests
 
 Run `cargo test` before opening a pull request. Scheduler tests do not need a
-GPU.
+GPU. llama.cpp GPU backends are Cargo features (`cuda`, `vulkan`, `metal`)
+on the `silkai` crate; they forward into `llama-cpp-2`. Do not enable more
+than one GPU backend at once, and do not use `--all-features`.
 
 ## Crate boundaries
 
