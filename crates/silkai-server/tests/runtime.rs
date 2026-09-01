@@ -4,8 +4,9 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
+use silkai_adapters::FakeEngine;
 use silkai_sched::clinic::{clinic_models, clinic_resources};
-use silkai_sched::{ModelSpec, Priority};
+use silkai_sched::{ModelSpec, Priority, Resources, Tier};
 use silkai_server::config::{AppConfig, ConfiguredModel};
 use silkai_server::runtime::{Runtime, RuntimeError};
 use tokio::net::TcpListener;
@@ -188,6 +189,92 @@ async fn ollama_submit_streams_from_http_engine() {
     }
     rt.finished(job).await;
     assert_eq!(out, "hello world");
+}
+
+fn crashy_cfg(name: &str) -> AppConfig {
+    AppConfig {
+        listen: "127.0.0.1:0".into(),
+        prefetch_on_start: false,
+        request_timeout_secs: 600,
+        request_timeout: Duration::from_secs(600),
+        resources: Resources::single(29.0, 96.0),
+        enabled: vec![ConfiguredModel {
+            engine: "fake".into(),
+            path: format!("/models/{name}.bin"),
+            url: None,
+            transport: "http".into(),
+            idle_timeout_secs: None,
+            spec: ModelSpec {
+                name: name.into(),
+                vram_gb: 8.0,
+                ram_gb: 8.0,
+                priority: Priority::Normal,
+                exclusive: true,
+                slots: 1,
+                keep_warm: true,
+                gpu: None,
+            },
+        }],
+        disabled: vec![],
+    }
+}
+
+fn model_status(rt: &Runtime, name: &str) -> (Tier, u32) {
+    let m = rt
+        .status()
+        .models
+        .into_iter()
+        .find(|m| m.name == name)
+        .unwrap();
+    (m.tier, m.running)
+}
+
+async fn collect_chat(rt: &Runtime, model: &str, prompt: &str) -> String {
+    let (job, mut tokens) = rt.submit_chat(model, prompt).await.unwrap();
+    let mut out = String::new();
+    while let Some(t) = tokens.recv().await {
+        out.push_str(&t);
+    }
+    rt.finished(job).await;
+    out
+}
+
+#[tokio::test]
+async fn load_failure_unloads_and_next_submit_retries() {
+    FakeEngine::fail_next_load("crashy-load");
+    let rt = Runtime::new(crashy_cfg("crashy-load")).await.unwrap();
+    let err = rt.submit_chat("crashy-load", "x").await.unwrap_err();
+    assert!(
+        matches!(err, RuntimeError::Engine(_)),
+        "expected engine error, got {err:?}"
+    );
+    assert_eq!(model_status(&rt, "crashy-load"), (Tier::Cupboard, 0));
+    let out = tokio::time::timeout(
+        Duration::from_secs(2),
+        collect_chat(&rt, "crashy-load", "hi"),
+    )
+    .await
+    .expect("retry submit after load fault should finish");
+    assert_eq!(out, "hi world");
+}
+
+#[tokio::test]
+async fn run_failure_unloads_and_next_submit_retries() {
+    FakeEngine::fail_next_run("crashy-run");
+    let rt = Runtime::new(crashy_cfg("crashy-run")).await.unwrap();
+    let err = rt.submit_chat("crashy-run", "x").await.unwrap_err();
+    assert!(
+        matches!(err, RuntimeError::Engine(_)),
+        "expected engine error, got {err:?}"
+    );
+    assert_eq!(model_status(&rt, "crashy-run"), (Tier::Cupboard, 0));
+    let out = tokio::time::timeout(
+        Duration::from_secs(2),
+        collect_chat(&rt, "crashy-run", "hi"),
+    )
+    .await
+    .expect("retry submit after run fault should finish");
+    assert_eq!(out, "hi world");
 }
 
 #[tokio::test]

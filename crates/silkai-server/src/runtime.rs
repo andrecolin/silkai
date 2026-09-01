@@ -132,7 +132,12 @@ impl Runtime {
         };
         self.inner.sessions.lock().await.insert(job_id);
         drop(sched);
-        self.apply_all(actions).await?;
+        if let Err(err) = self.apply_all(actions).await {
+            self.inner.sessions.lock().await.remove(&job_id);
+            let mut sched = self.inner.scheduler.lock().await;
+            self.isolate(&mut sched, job_id).await;
+            return Err(err);
+        }
         let sched = self.inner.scheduler.lock().await;
         self.record_status(&sched);
         drop(sched);
@@ -252,7 +257,10 @@ impl Runtime {
             SubmitResult::Rejected { reason } => return Err(reject_err(reason)),
         };
         self.store_waiter(job_id, prompt, tx).await;
-        self.apply_all(actions).await?;
+        if let Err(err) = self.apply_all(actions).await {
+            self.isolate(&mut sched, job_id).await;
+            return Err(err);
+        }
         self.record_status(&sched);
         Ok(job_id)
     }
@@ -341,6 +349,14 @@ impl Runtime {
             token.cancel();
         }
         self.inner.waiters.lock().await.remove(&job_id);
+    }
+
+    async fn isolate(&self, sched: &mut Scheduler, job_id: JobId) {
+        tracing::warn!(job_id = job_id.0, "engine fault");
+        let actions = sched.fault(job_id);
+        self.record_status(sched);
+        self.forget(job_id).await;
+        let _ = self.apply_all(actions).await;
     }
 
     async fn apply_all(&self, actions: Vec<Action>) -> Result<(), RuntimeError> {

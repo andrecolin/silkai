@@ -1,4 +1,5 @@
-use std::sync::{Mutex, MutexGuard};
+use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -6,6 +7,30 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{Engine, EngineError};
+
+fn fail_next() -> &'static Mutex<HashMap<String, FailNext>> {
+    static MAP: OnceLock<Mutex<HashMap<String, FailNext>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[derive(Default)]
+struct FailNext {
+    load: u32,
+    run: u32,
+}
+
+fn take_fail(name: &str, which: fn(&mut FailNext) -> &mut u32) -> bool {
+    let mut map = fail_next().lock().expect("fail-next mutex");
+    let Some(slot) = map.get_mut(name) else {
+        return false;
+    };
+    let count = which(slot);
+    if *count == 0 {
+        return false;
+    }
+    *count -= 1;
+    true
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tier {
@@ -21,13 +46,15 @@ struct Inner {
 }
 
 pub struct FakeEngine {
+    name: String,
     vram_gb: f64,
     inner: Mutex<Inner>,
 }
 
 impl FakeEngine {
-    pub fn new(_name: &str, vram_gb: f64) -> Self {
+    pub fn new(name: &str, vram_gb: f64) -> Self {
         Self {
+            name: name.to_string(),
             vram_gb,
             inner: Mutex::new(Inner {
                 log: Vec::new(),
@@ -35,6 +62,24 @@ impl FakeEngine {
                 gpu: None,
             }),
         }
+    }
+
+    pub fn fail_next_load(name: &str) {
+        fail_next()
+            .lock()
+            .expect("fail-next mutex")
+            .entry(name.to_string())
+            .or_default()
+            .load += 1;
+    }
+
+    pub fn fail_next_run(name: &str) {
+        fail_next()
+            .lock()
+            .expect("fail-next mutex")
+            .entry(name.to_string())
+            .or_default()
+            .run += 1;
     }
 
     pub fn log(&self) -> Vec<String> {
@@ -68,6 +113,9 @@ impl Engine for FakeEngine {
     }
 
     async fn load(&self, _path: &str, gpu: u32) -> Result<(), EngineError> {
+        if take_fail(&self.name, |f| &mut f.load) {
+            return Err(EngineError::Other("load failed".into()));
+        }
         self.lock().gpu = Some(gpu);
         self.record("load", Tier::Bench);
         Ok(())
@@ -94,6 +142,9 @@ impl Engine for FakeEngine {
         prompt: &str,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError> {
+        if take_fail(&self.name, |f| &mut f.run) {
+            return Err(EngineError::Other("run failed".into()));
+        }
         if self.tier() != Tier::Bench {
             return Err(EngineError::NotLoaded);
         }

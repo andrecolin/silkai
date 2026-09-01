@@ -1,6 +1,9 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use silkai_adapters::FakeEngine;
+use silkai_sched::{ModelSpec, Priority, Resources};
 use silkai_server::app::test_app;
+use silkai_server::config::{AppConfig, ConfiguredModel};
 use tower::ServiceExt;
 
 fn chat(model: &str, stream: bool) -> Request<Body> {
@@ -15,6 +18,59 @@ fn chat(model: &str, stream: bool) -> Request<Body> {
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .unwrap()
+}
+
+fn crashy_http_cfg() -> AppConfig {
+    AppConfig {
+        listen: "127.0.0.1:0".into(),
+        prefetch_on_start: false,
+        request_timeout_secs: 600,
+        request_timeout: std::time::Duration::from_secs(600),
+        resources: Resources::single(29.0, 96.0),
+        enabled: vec![ConfiguredModel {
+            engine: "fake".into(),
+            path: "/models/crashy-http.bin".into(),
+            url: None,
+            transport: "http".into(),
+            idle_timeout_secs: None,
+            spec: ModelSpec {
+                name: "crashy-http".into(),
+                vram_gb: 8.0,
+                ram_gb: 8.0,
+                priority: Priority::Normal,
+                exclusive: true,
+                slots: 1,
+                keep_warm: true,
+                gpu: None,
+            },
+        }],
+        disabled: vec![],
+    }
+}
+
+#[tokio::test]
+async fn engine_fault_returns_500_health_stays_ok() {
+    FakeEngine::fail_next_load("crashy-http");
+    let app = silkai_server::app::app_from_config(crashy_http_cfg()).await;
+    let res = app
+        .clone()
+        .oneshot(chat("crashy-http", false))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let health = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    let res = app.oneshot(chat("crashy-http", false)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
 }
 
 #[tokio::test]

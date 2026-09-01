@@ -173,6 +173,27 @@ impl Scheduler {
         self.finish(job_id)
     }
 
+    pub fn fault(&mut self, job_id: JobId) -> Vec<Action> {
+        if self.queue.iter().any(|(id, _)| *id == job_id) {
+            self.remove_queued(job_id);
+            return Vec::new();
+        }
+        let Some(model) = self.jobs.remove(&job_id) else {
+            return Vec::new();
+        };
+        self.decr_running(&model);
+        for id in self.running_job_ids(&model) {
+            self.jobs.remove(&id);
+        }
+        if let Some(n) = self.running.get_mut(&model) {
+            *n = 0;
+        }
+        self.on_gpu.remove(&model);
+        self.idle_since.remove(&model);
+        self.tiers.insert(model.clone(), Tier::Cupboard);
+        vec![Action::Discard { model }]
+    }
+
     fn alloc_id(&mut self) -> JobId {
         let id = JobId(self.next_id);
         self.next_id += 1;

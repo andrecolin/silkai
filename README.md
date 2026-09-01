@@ -129,7 +129,9 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 
 Streaming: `"stream": true` (SSE). Also `GET /v1/models` and `GET /v1/status`
 (models plus per-GPU `used_gb` / `schedulable_gb`). The daemon logs load, wake,
-sleep, discard, and preempt.
+sleep, discard, and preempt. If an engine load or run fails, that job is 500,
+the copy is marked not resident, and the next request loads again. The daemon
+stays up.
 
 Any model with `transport = "websocket"` or `"both"`:
 
