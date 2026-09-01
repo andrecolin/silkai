@@ -299,6 +299,23 @@ async fn stream_end_then_live_submit_does_not_panic() {
     rt.finished(w_job).await; // must not panic
 }
 
+#[tokio::test]
+async fn preempted_soap_does_not_replay_streamed_tokens() {
+    let rt = Runtime::new(clinic_cfg()).await.unwrap();
+    let (soap_job, mut soap_rx) = rt.submit_chat("soap", "note").await.unwrap();
+    let first = soap_rx.recv().await.expect("first soap token");
+    assert_eq!(first, "note");
+    let (w_job, mut w_rx) = rt.submit_chat("whisper", "hi").await.unwrap();
+    while w_rx.recv().await.is_some() {}
+    rt.finished(w_job).await;
+    let mut got = vec![first];
+    while let Some(t) = soap_rx.recv().await {
+        got.push(t);
+    }
+    rt.finished(soap_job).await;
+    assert_eq!(got, vec!["note".to_string(), " world".to_string()]);
+}
+
 fn ws_whisper_cfg() -> AppConfig {
     let mut cfg = clinic_cfg();
     for model in &mut cfg.enabled {

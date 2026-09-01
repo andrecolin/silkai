@@ -29,6 +29,7 @@ pub enum RuntimeError {
 
 struct Waiter {
     prompt: String,
+    emitted: String,
     tx: mpsc::Sender<String>,
 }
 
@@ -159,7 +160,7 @@ impl Runtime {
         }
         let token = self.watch(job_id).await;
         let engine = Arc::clone(self.engine(model)?);
-        engine.run(prompt, token).await.map_err(engine_err)
+        engine.run(prompt, "", token).await.map_err(engine_err)
     }
 
     async fn wait_until_running(&self, job_id: JobId) -> Result<(), RuntimeError> {
@@ -320,18 +321,25 @@ impl Runtime {
     async fn store_waiter(&self, job_id: JobId, prompt: &str, tx: mpsc::Sender<String>) {
         let waiter = Waiter {
             prompt: prompt.to_string(),
+            emitted: String::new(),
             tx,
         };
         self.inner.waiters.lock().await.insert(job_id, waiter);
     }
 
-    async fn waiter(&self, job_id: JobId) -> Option<(String, mpsc::Sender<String>)> {
+    async fn waiter(&self, job_id: JobId) -> Option<(String, String, mpsc::Sender<String>)> {
         self.inner
             .waiters
             .lock()
             .await
             .get(&job_id)
-            .map(|w| (w.prompt.clone(), w.tx.clone()))
+            .map(|w| (w.prompt.clone(), w.emitted.clone(), w.tx.clone()))
+    }
+
+    async fn append_emitted(&self, job_id: JobId, chunk: &str) {
+        if let Some(w) = self.inner.waiters.lock().await.get_mut(&job_id) {
+            w.emitted.push_str(chunk);
+        }
     }
 
     async fn watch(&self, job_id: JobId) -> CancellationToken {
@@ -414,13 +422,13 @@ impl Runtime {
     }
 
     async fn start(&self, job_id: JobId, model: &str) -> Result<(), RuntimeError> {
-        let Some((prompt, tx)) = self.waiter(job_id).await else {
+        let Some((prompt, prefix, tx)) = self.waiter(job_id).await else {
             return Ok(());
         };
         let token = self.watch(job_id).await;
         let engine = Arc::clone(self.engine(model)?);
         let rx = engine
-            .run(&prompt, token.clone())
+            .run(&prompt, &prefix, token.clone())
             .await
             .map_err(engine_err)?;
         let rt = self.clone();
@@ -453,7 +461,7 @@ async fn forward_job(
     token: CancellationToken,
     rt: Runtime,
 ) {
-    pump_tokens(rx, tx, token.clone()).await;
+    pump_tokens(job_id, rx, tx, token.clone(), &rt).await;
     if token.is_cancelled() {
         return;
     }
@@ -472,15 +480,18 @@ async fn apply_loop(weak: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Vec<Actio
 }
 
 async fn pump_tokens(
+    job_id: JobId,
     mut rx: mpsc::Receiver<String>,
     tx: mpsc::Sender<String>,
     token: CancellationToken,
+    rt: &Runtime,
 ) {
     loop {
         tokio::select! {
             _ = token.cancelled() => return,
             next = rx.recv() => match next {
                 Some(chunk) => {
+                    rt.append_emitted(job_id, &chunk).await;
                     if tx.send(chunk).await.is_err() {
                         return;
                     }

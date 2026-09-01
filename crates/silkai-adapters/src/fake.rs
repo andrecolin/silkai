@@ -140,6 +140,7 @@ impl Engine for FakeEngine {
     async fn run(
         &self,
         prompt: &str,
+        prefix: &str,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError> {
         if take_fail(&self.name, |f| &mut f.run) {
@@ -148,7 +149,7 @@ impl Engine for FakeEngine {
         if self.tier() != Tier::Bench {
             return Err(EngineError::NotLoaded);
         }
-        Ok(spawn_chunks(prompt.to_string(), cancel))
+        Ok(spawn_chunks(prompt.to_string(), prefix.to_string(), cancel))
     }
 
     fn measured_vram_gb(&self) -> f64 {
@@ -156,29 +157,57 @@ impl Engine for FakeEngine {
     }
 }
 
-fn spawn_chunks(prompt: String, cancel: CancellationToken) -> mpsc::Receiver<String> {
+fn spawn_chunks(
+    prompt: String,
+    prefix: String,
+    cancel: CancellationToken,
+) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel(2);
     tokio::spawn(async move {
-        stream_chunks(tx, prompt, cancel).await;
+        stream_chunks(tx, prompt, prefix, cancel).await;
     });
     rx
 }
 
-async fn stream_chunks(tx: mpsc::Sender<String>, prompt: String, cancel: CancellationToken) {
-    if cancel.is_cancelled() {
-        return;
+async fn stream_chunks(
+    tx: mpsc::Sender<String>,
+    prompt: String,
+    prefix: String,
+    cancel: CancellationToken,
+) {
+    let chunks = [prompt, " world".to_string()];
+    let last = chunks.len() - 1;
+    let mut seen = String::new();
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let emit = leftover(&mut seen, &prefix, &chunk);
+        if !emit.is_empty() && tx.send(emit).await.is_err() {
+            return;
+        }
+        if i == last {
+            break;
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_millis(80)) => {}
+        }
     }
-    if tx.send(prompt).await.is_err() {
-        return;
+}
+
+fn leftover(seen: &mut String, prefix: &str, chunk: &str) -> String {
+    if seen.len() >= prefix.len() {
+        seen.push_str(chunk);
+        return chunk.to_string();
     }
-    tokio::select! {
-        _ = cancel.cancelled() => return,
-        _ = tokio::time::sleep(Duration::from_millis(80)) => {}
+    let already = prefix.len() - seen.len();
+    seen.push_str(chunk);
+    if chunk.len() <= already || !chunk.is_char_boundary(already) {
+        String::new()
+    } else {
+        chunk[already..].to_string()
     }
-    if cancel.is_cancelled() {
-        return;
-    }
-    let _ = tx.send(" world".to_string()).await;
 }
 
 #[cfg(test)]
@@ -203,7 +232,7 @@ mod tests {
         let e = FakeEngine::new("soap", 28.0);
         e.load("/x", 0).await.unwrap();
         let cancel = CancellationToken::new();
-        let mut rx = e.run("hello", cancel).await.unwrap();
+        let mut rx = e.run("hello", "", cancel).await.unwrap();
         let mut got = Vec::new();
         while let Some(t) = rx.recv().await {
             got.push(t);
@@ -217,7 +246,22 @@ mod tests {
         e.load("/x", 0).await.unwrap();
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let mut rx = e.run("hello", cancel).await.unwrap();
+        let mut rx = e.run("hello", "", cancel).await.unwrap();
         assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn fake_run_skips_prefix_already_streamed() {
+        let e = FakeEngine::new("soap", 28.0);
+        e.load("/x", 0).await.unwrap();
+        let mut rx = e
+            .run("hello", "hello", CancellationToken::new())
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        while let Some(t) = rx.recv().await {
+            got.push(t);
+        }
+        assert_eq!(got, vec![" world".to_string()]);
     }
 }

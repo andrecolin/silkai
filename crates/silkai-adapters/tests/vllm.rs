@@ -39,7 +39,7 @@ async fn vllm_run_streams_sse_content() {
     let (url, log) = spawn_mock().await;
     let e = VllmEngine::new("write", 28.0, &url);
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
-    let mut rx = e.run("hello", CancellationToken::new()).await.unwrap();
+    let mut rx = e.run("hello", "", CancellationToken::new()).await.unwrap();
     let mut got = Vec::new();
     while let Some(t) = rx.recv().await {
         got.push(t);
@@ -53,7 +53,10 @@ async fn vllm_run_streams_sse_content() {
 async fn vllm_run_without_load_is_not_loaded() {
     let (url, _) = spawn_mock().await;
     let e = VllmEngine::new("write", 28.0, &url);
-    let err = e.run("hello", CancellationToken::new()).await.unwrap_err();
+    let err = e
+        .run("hello", "", CancellationToken::new())
+        .await
+        .unwrap_err();
     assert!(matches!(err, EngineError::NotLoaded));
 }
 
@@ -63,7 +66,10 @@ async fn vllm_run_after_sleep_is_not_loaded() {
     let e = VllmEngine::new("write", 28.0, &url);
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
     e.sleep().await.unwrap();
-    let err = e.run("hello", CancellationToken::new()).await.unwrap_err();
+    let err = e
+        .run("hello", "", CancellationToken::new())
+        .await
+        .unwrap_err();
     assert!(matches!(err, EngineError::NotLoaded));
 }
 
@@ -74,7 +80,7 @@ async fn vllm_run_stops_on_cancel() {
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let mut rx = e.run("hello", cancel).await.unwrap();
+    let mut rx = e.run("hello", "", cancel).await.unwrap();
     assert!(rx.recv().await.is_none());
 }
 

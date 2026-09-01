@@ -29,6 +29,7 @@ pub trait Engine: Send + Sync {
     async fn run(
         &self,
         prompt: &str,
+        prefix: &str,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError>;
     fn measured_vram_gb(&self) -> f64;

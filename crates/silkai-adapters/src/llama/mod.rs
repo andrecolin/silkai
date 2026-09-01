@@ -79,9 +79,10 @@ impl Engine for LlamaEngine {
     async fn run(
         &self,
         prompt: &str,
+        prefix: &str,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError> {
-        start_run(self, prompt, cancel)
+        start_run(self, prompt, prefix, cancel)
     }
 
     fn measured_vram_gb(&self) -> f64 {
@@ -118,18 +119,25 @@ async fn place_model(
 fn start_run(
     engine: &LlamaEngine,
     prompt: &str,
+    prefix: &str,
     cancel: CancellationToken,
 ) -> Result<mpsc::Receiver<String>, EngineError> {
-    cpp::start_run(Arc::clone(&engine.inner), prompt.to_string(), cancel)
+    cpp::start_run(
+        Arc::clone(&engine.inner),
+        prompt.to_string(),
+        prefix.to_string(),
+        cancel,
+    )
 }
 
 #[cfg(not(feature = "llama"))]
 fn start_run(
     engine: &LlamaEngine,
     prompt: &str,
+    prefix: &str,
     cancel: CancellationToken,
 ) -> Result<mpsc::Receiver<String>, EngineError> {
-    let _ = (engine, prompt, cancel);
+    let _ = (engine, prompt, prefix, cancel);
     refuse_without_feature()
 }
 
@@ -170,7 +178,10 @@ mod llama_stub_tests {
     #[tokio::test]
     async fn run_fails_without_feature() {
         let e = LlamaEngine::new("soap", 1.0);
-        let err = e.run("hello", CancellationToken::new()).await.unwrap_err();
+        let err = e
+            .run("hello", "", CancellationToken::new())
+            .await
+            .unwrap_err();
         match err {
             EngineError::Other(msg) => assert!(msg.contains("llama")),
             other => panic!("expected Other, got {other:?}"),

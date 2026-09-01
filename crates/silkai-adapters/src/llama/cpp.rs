@@ -33,6 +33,7 @@ pub async fn place(
 pub fn start_run(
     inner: Arc<Mutex<Inner>>,
     prompt: String,
+    prefix: String,
     cancel: CancellationToken,
 ) -> Result<mpsc::Receiver<String>, EngineError> {
     if !inner.lock().expect("llama engine mutex").on_bench {
@@ -40,7 +41,12 @@ pub fn start_run(
     }
     let (tx, rx) = mpsc::channel(16);
     tokio::task::spawn_blocking(move || {
-        let _ = generate(&inner, &prompt, tx, cancel);
+        let input = if prefix.is_empty() {
+            prompt
+        } else {
+            format!("{prompt}{prefix}")
+        };
+        let _ = generate(&inner, &input, tx, cancel);
     });
     Ok(rx)
 }

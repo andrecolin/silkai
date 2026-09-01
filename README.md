@@ -131,7 +131,8 @@ Streaming: `"stream": true` (SSE). Also `GET /v1/models` and `GET /v1/status`
 (models plus per-GPU `used_gb` / `schedulable_gb`). The daemon logs load, wake,
 sleep, discard, and preempt. If an engine load or run fails, that job is 500,
 the copy is marked not resident, and the next request loads again. The daemon
-stays up.
+stays up. A preempted generate resumes from tokens already streamed; the
+client does not see the prefix twice.
 
 Any model with `transport = "websocket"` or `"both"`:
 

@@ -115,6 +115,7 @@ impl Engine for OllamaEngine {
     async fn run(
         &self,
         prompt: &str,
+        prefix: &str,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError> {
         if !self.on_bench() {
@@ -128,8 +129,9 @@ impl Engine for OllamaEngine {
         let client = self.client.clone();
         let url = format!("{}/api/chat", self.url);
         let prompt = prompt.to_string();
+        let prefix = prefix.to_string();
         tokio::spawn(async move {
-            stream_chat(client, url, model, prompt, tx, cancel).await;
+            stream_chat(client, url, model, prompt, prefix, tx, cancel).await;
         });
         Ok(rx)
     }
@@ -144,12 +146,17 @@ async fn stream_chat(
     url: String,
     model: String,
     prompt: String,
+    prefix: String,
     tx: mpsc::Sender<String>,
     cancel: CancellationToken,
 ) {
+    let mut messages = vec![serde_json::json!({"role": "user", "content": prompt})];
+    if !prefix.is_empty() {
+        messages.push(serde_json::json!({"role": "assistant", "content": prefix}));
+    }
     let body = serde_json::json!({
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "stream": true,
         "keep_alive": -1,
     });
