@@ -1,8 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::types::{
-    Action, JobId, ModelSpec, ModelStatus, Priority, RejectReason, Resources, StatusSnapshot,
-    SubmitResult, Tier,
+    Action, GpuStatus, JobId, ModelSpec, ModelStatus, Priority, RejectReason, Resources,
+    StatusSnapshot, SubmitResult, Tier,
 };
 
 #[derive(Debug)]
@@ -95,7 +95,20 @@ impl Scheduler {
             models: self.model_statuses(),
             gpu_used_gb: self.gpu_used_gb(),
             ram_used_gb: self.ram_used_gb(),
+            gpus: self.gpu_statuses(),
         }
+    }
+
+    fn gpu_statuses(&self) -> Vec<GpuStatus> {
+        self.resources
+            .benches()
+            .into_iter()
+            .map(|g| GpuStatus {
+                id: g.id,
+                used_gb: self.gpu_used_on(g.id),
+                schedulable_gb: g.schedulable_gb,
+            })
+            .collect()
     }
 
     fn model_statuses(&self) -> Vec<ModelStatus> {

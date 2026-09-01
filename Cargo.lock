@@ -1344,6 +1344,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tower",
+ "tracing",
 ]
 
 [[package]]

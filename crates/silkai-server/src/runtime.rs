@@ -351,6 +351,9 @@ impl Runtime {
     }
 
     async fn apply(&self, action: Action) -> Result<(), RuntimeError> {
+        if let Some(line) = action_log(&action) {
+            tracing::info!("{line}");
+        }
         match action {
             Action::Warm { model } => self.warm(&model).await,
             Action::Load { model, gpu } => self.load(&model, gpu).await,
@@ -603,4 +606,69 @@ fn reject_err(reason: RejectReason) -> RuntimeError {
 
 fn missing(kind: &str, model: &str) -> RuntimeError {
     RuntimeError::Engine(EngineError::Other(format!("no {kind}: {model}")))
+}
+
+fn action_log(action: &Action) -> Option<String> {
+    match action {
+        Action::Load { model, gpu } => Some(format!("load {model} gpu={gpu}")),
+        Action::Wake { model, gpu } => Some(format!("wake {model} gpu={gpu}")),
+        Action::Sleep { model } => Some(format!("sleep {model}")),
+        Action::Discard { model } => Some(format!("discard {model}")),
+        Action::Warm { model } => Some(format!("warm {model}")),
+        Action::Preempt { job_id } => Some(format!("preempt job={}", job_id.0)),
+        Action::Start { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod action_log_tests {
+    use silkai_sched::{Action, JobId};
+
+    use super::action_log;
+
+    #[test]
+    fn load_names_model_and_gpu() {
+        let line = action_log(&Action::Load {
+            model: "write".into(),
+            gpu: 1,
+        })
+        .unwrap();
+        assert_eq!(line, "load write gpu=1");
+    }
+
+    #[test]
+    fn wake_names_model_and_gpu() {
+        let line = action_log(&Action::Wake {
+            model: "write".into(),
+            gpu: 0,
+        })
+        .unwrap();
+        assert_eq!(line, "wake write gpu=0");
+    }
+
+    #[test]
+    fn sleep_names_model() {
+        let line = action_log(&Action::Sleep {
+            model: "write".into(),
+        })
+        .unwrap();
+        assert_eq!(line, "sleep write");
+    }
+
+    #[test]
+    fn preempt_names_job() {
+        let line = action_log(&Action::Preempt { job_id: JobId(7) }).unwrap();
+        assert_eq!(line, "preempt job=7");
+    }
+
+    #[test]
+    fn start_is_silent() {
+        assert_eq!(
+            action_log(&Action::Start {
+                job_id: JobId(1),
+                model: "write".into(),
+            }),
+            None
+        );
+    }
 }

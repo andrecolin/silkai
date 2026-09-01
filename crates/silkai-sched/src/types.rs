@@ -102,8 +102,16 @@ pub struct ModelStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct GpuStatus {
+    pub id: u32,
+    pub used_gb: f64,
+    pub schedulable_gb: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct StatusSnapshot {
     pub models: Vec<ModelStatus>,
     pub gpu_used_gb: f64,
     pub ram_used_gb: f64,
+    pub gpus: Vec<GpuStatus>,
 }

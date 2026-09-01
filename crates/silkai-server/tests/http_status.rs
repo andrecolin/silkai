@@ -64,4 +64,9 @@ async fn status_json_has_tiers() {
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(v.get("models").is_some());
     assert!(v.get("gpu_used_gb").is_some());
+    let gpus = v["gpus"].as_array().expect("gpus");
+    assert_eq!(gpus.len(), 1);
+    assert_eq!(gpus[0]["id"], 0);
+    assert_eq!(gpus[0]["used_gb"], 0.0);
+    assert_eq!(gpus[0]["schedulable_gb"], 29.0);
 }
