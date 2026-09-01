@@ -132,6 +132,32 @@ exclusive = true
 }
 
 #[test]
+fn parses_ollama_engine_and_url() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+
+[resources]
+gpu_total_gb = 32
+gpu_headroom_gb = 3
+ram_total_gb = 128
+ram_headroom_gb = 32
+
+[models.write]
+engine = "ollama"
+path = "llama3.2"
+url = "http://127.0.0.1:11434"
+vram_gb = 8
+priority = "normal"
+exclusive = true
+"#;
+    let cfg = load_from_str(t).unwrap();
+    let write = cfg.enabled.iter().find(|m| m.spec.name == "write").unwrap();
+    assert_eq!(write.engine, "ollama");
+    assert_eq!(write.path, "llama3.2");
+    assert_eq!(write.url.as_deref(), Some("http://127.0.0.1:11434"));
+}
+
+#[test]
 fn missing_gpu_total_errors() {
     let t = r#"
 listen = "127.0.0.1:8080"

@@ -153,6 +153,43 @@ async fn vllm_submit_streams_from_http_engine() {
     assert_eq!(out, "hello world");
 }
 
+fn ollama_soap_cfg(url: Option<&str>) -> AppConfig {
+    let mut cfg = clinic_cfg();
+    for model in &mut cfg.enabled {
+        if model.spec.name == "soap" {
+            model.engine = "ollama".into();
+            model.path = "llama3.2".into();
+            model.url = url.map(str::to_string);
+        }
+    }
+    cfg
+}
+
+#[tokio::test]
+async fn ollama_engine_is_known() {
+    let rt = Runtime::new(ollama_soap_cfg(Some("http://127.0.0.1:1")))
+        .await
+        .unwrap();
+    let err = rt.submit_chat("soap", "x").await.unwrap_err();
+    assert!(
+        !matches!(err, RuntimeError::Unavailable | RuntimeError::Unknown),
+        "expected an engine error, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn ollama_submit_streams_from_http_engine() {
+    let url = spawn_ollama_mock().await;
+    let rt = Runtime::new(ollama_soap_cfg(Some(&url))).await.unwrap();
+    let (job, mut tokens) = rt.submit_chat("soap", "note").await.unwrap();
+    let mut out = String::new();
+    while let Some(t) = tokens.recv().await {
+        out.push_str(&t);
+    }
+    rt.finished(job).await;
+    assert_eq!(out, "hello world");
+}
+
 #[tokio::test]
 async fn unknown_engine_submit_unavailable() {
     let rt = Runtime::new(nope_soap_cfg()).await.unwrap();
@@ -250,6 +287,33 @@ async fn vllm_chat_sse() -> impl IntoResponse {
             "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
             "data: [DONE]\n\n",
+        ),
+    )
+}
+
+async fn spawn_ollama_mock() -> String {
+    let app = Router::new()
+        .route("/api/generate", post(ollama_generate))
+        .route("/api/chat", post(ollama_chat));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn ollama_generate() -> impl IntoResponse {
+    axum::Json(serde_json::json!({"done": true, "response": ""}))
+}
+
+async fn ollama_chat() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        concat!(
+            "{\"message\":{\"content\":\"hello\"},\"done\":false}\n",
+            "{\"message\":{\"content\":\" world\"},\"done\":false}\n",
+            "{\"message\":{\"content\":\"\"},\"done\":true}\n",
         ),
     )
 }

@@ -64,7 +64,8 @@ disk.
 
 Slice 1 is a working **Linux** daemon (`127.0.0.1` only): scheduler, HTTP chat
 completions, fake engines (no GPU required), optional llama.cpp behind
-`--features llama`, and a vLLM HTTP adapter (`engine = "vllm"`).
+`--features llama`, and HTTP adapters for vLLM (`engine = "vllm"`) and Ollama
+(`engine = "ollama"`).
 
 WebSocket is a **per-model** option (`transport = "websocket"` or `"both"`).
 Any configured model can take a session. An open socket holds that model’s
@@ -158,6 +159,18 @@ gpu = 0                           # pin SilkAI's budget to the card vLLM uses
 
 SilkAI posts `/wake_up`, `/sleep?level=1`, and streaming `/v1/chat/completions`.
 It does not spawn or stop the vLLM process.
+
+Ollama is the same idea: start Ollama yourself, then:
+
+```toml
+engine = "ollama"
+path = "llama3.2"                 # Ollama model name
+url = "http://127.0.0.1:11434"    # optional; this is the default
+```
+
+Load/wake POST `/api/generate` with `keep_alive = -1`. Sleep unloads with
+`keep_alive = 0` (Ollama has no RAM shelf). Chat is streaming `/api/chat`.
+SilkAI does not spawn or stop Ollama.
 
 ## Development
 

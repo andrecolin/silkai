@@ -1,8 +1,10 @@
 mod fake;
 mod llama;
+mod ollama;
 mod vllm;
 pub use fake::FakeEngine;
 pub use llama::LlamaEngine;
+pub use ollama::OllamaEngine;
 pub use vllm::VllmEngine;
 
 use async_trait::async_trait;
