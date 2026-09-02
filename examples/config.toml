@@ -45,6 +45,7 @@ engine = "fake"
 # engine = "ollama"
 # engine = "process"
 # cmd = ["vllm", "serve", "Qwen/Qwen3-0.6B", "--port", "8001"]
+# url = "http://127.0.0.1:8001"     # process: must match --port
 path = "/models/write-q4.gguf"
 # path = "Qwen/Qwen3-0.6B"          # vLLM model id
 # path = "llama3.2"                 # Ollama model name

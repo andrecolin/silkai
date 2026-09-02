@@ -289,15 +289,14 @@ fn split_models(
 fn limit_for(spec: &ModelSpec, resources: &Resources) -> f64 {
     if spec.is_split() {
         let benches = resources.benches();
-        spec.gpus
-            .iter()
-            .filter_map(|id| {
-                benches
-                    .iter()
-                    .find(|g| g.id == *id)
-                    .map(|g| g.schedulable_gb)
-            })
-            .fold(f64::INFINITY, f64::min)
+        let mut min = f64::INFINITY;
+        for id in &spec.gpus {
+            match benches.iter().find(|g| g.id == *id) {
+                Some(g) => min = min.min(g.schedulable_gb),
+                None => return 0.0,
+            }
+        }
+        min
     } else {
         resources.max_schedulable()
     }
@@ -307,6 +306,17 @@ fn configured_model(name: String, m: FileModel) -> Result<ConfiguredModel, Confi
     if m.engine == "process" && m.cmd.is_empty() {
         return Err(ConfigError::Invalid(format!(
             "model {name}: engine process requires cmd"
+        )));
+    }
+    if m.gpus.len() == 1 {
+        return Err(ConfigError::Invalid(format!(
+            "model {name}: gpus needs two or more ids; use gpu = {} to pin one card",
+            m.gpus[0]
+        )));
+    }
+    if m.gpu.is_some() && m.gpus.len() >= 2 {
+        return Err(ConfigError::Invalid(format!(
+            "model {name}: set gpu or gpus, not both"
         )));
     }
     Ok(ConfiguredModel {

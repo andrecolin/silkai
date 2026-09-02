@@ -223,6 +223,103 @@ exclusive = true
 }
 
 #[test]
+fn disables_oversized_split() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+
+[resources]
+ram_total_gb = 128
+ram_headroom_gb = 32
+
+[[resources.gpus]]
+id = 0
+total_gb = 16
+headroom_gb = 3
+
+[[resources.gpus]]
+id = 1
+total_gb = 16
+headroom_gb = 3
+
+[models.huge]
+engine = "fake"
+path = "/models/huge.gguf"
+vram_gb = 40
+priority = "normal"
+exclusive = true
+gpus = [0, 1]
+"#;
+    let cfg = load_from_str(t).unwrap();
+    assert!(cfg.disabled.iter().any(|m| m.spec.name == "huge"));
+    assert!(!cfg.enabled.iter().any(|m| m.spec.name == "huge"));
+}
+
+#[test]
+fn disables_split_with_unknown_gpu_id() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+
+[resources]
+ram_total_gb = 128
+ram_headroom_gb = 32
+
+[[resources.gpus]]
+id = 0
+total_gb = 32
+headroom_gb = 3
+
+[[resources.gpus]]
+id = 1
+total_gb = 32
+headroom_gb = 3
+
+[models.huge]
+engine = "fake"
+path = "/models/huge.gguf"
+vram_gb = 40
+priority = "normal"
+gpus = [0, 99]
+"#;
+    let cfg = load_from_str(t).unwrap();
+    assert!(cfg.disabled.iter().any(|m| m.spec.name == "huge"));
+}
+
+#[test]
+fn rejects_gpu_pin_together_with_split_gpus() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+[resources]
+gpu_total_gb = 32
+ram_total_gb = 128
+[models.huge]
+engine = "fake"
+path = "/models/huge.gguf"
+vram_gb = 10
+priority = "normal"
+gpu = 1
+gpus = [0, 1]
+"#;
+    assert!(load_from_str(t).is_err());
+}
+
+#[test]
+fn rejects_single_id_gpus_list() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+[resources]
+gpu_total_gb = 32
+ram_total_gb = 128
+[models.index]
+engine = "fake"
+path = "/models/index.gguf"
+vram_gb = 10
+priority = "background"
+gpus = [1]
+"#;
+    assert!(load_from_str(t).is_err());
+}
+
+#[test]
 fn process_engine_without_cmd_errors() {
     let t = r#"
 listen = "127.0.0.1:8080"

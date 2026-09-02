@@ -191,7 +191,8 @@ SilkAI does not spawn or stop Ollama.
 
 `engine = "process"` starts and stops a child for you. Chat is the same
 OpenAI HTTP as vLLM (`/wake_up` on load, streaming `/v1/chat/completions`).
-Sleep kills the process (no RAM shelf):
+Load waits until the child answers `/wake_up` (up to 60s). Sleep kills the
+process group (no RAM shelf):
 
 ```toml
 engine = "process"

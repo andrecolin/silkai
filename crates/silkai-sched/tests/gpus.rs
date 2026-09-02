@@ -55,6 +55,41 @@ fn started(r: &SubmitResult) -> bool {
     )
 }
 
+fn split_huge() -> ModelSpec {
+    ModelSpec {
+        name: "huge".into(),
+        vram_gb: 40.0,
+        ram_gb: 40.0,
+        priority: Priority::Normal,
+        exclusive: true,
+        slots: 1,
+        keep_warm: true,
+        gpu: None,
+        gpus: vec![0, 1],
+    }
+}
+
+fn pin_exclusive(name: &str, gpu: u32) -> ModelSpec {
+    ModelSpec {
+        name: name.into(),
+        vram_gb: 8.0,
+        ram_gb: 8.0,
+        priority: Priority::Normal,
+        exclusive: true,
+        slots: 1,
+        keep_warm: true,
+        gpu: Some(gpu),
+        gpus: Vec::new(),
+    }
+}
+
+fn job_id(r: SubmitResult) -> silkai_sched::JobId {
+    match r {
+        SubmitResult::Accepted { job_id, .. } => job_id,
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn eighty_and_thirty_do_not_fit_one_gpu() {
     let mut s = Scheduler::new(Resources::single(29.0, 96.0), vec![writer(), indexer()]).unwrap();
@@ -142,18 +177,7 @@ fn bigger_than_every_gpu_is_too_large() {
 
 #[test]
 fn forty_gb_split_runs_on_two_29gb_cards() {
-    let huge = ModelSpec {
-        name: "huge".into(),
-        vram_gb: 40.0,
-        ram_gb: 40.0,
-        priority: Priority::Normal,
-        exclusive: true,
-        slots: 1,
-        keep_warm: true,
-        gpu: None,
-        gpus: vec![0, 1],
-    };
-    let mut s = Scheduler::new(two_gpu_resources(), vec![huge]).unwrap();
+    let mut s = Scheduler::new(two_gpu_resources(), vec![split_huge()]).unwrap();
     assert!(started(&s.submit("huge")));
     assert_eq!(s.tier("huge"), Tier::Bench);
     assert_eq!(s.gpu_of("huge"), Some(0));
@@ -166,21 +190,155 @@ fn forty_gb_split_runs_on_two_29gb_cards() {
 
 #[test]
 fn exclusive_split_blocks_both_cards() {
-    let huge = ModelSpec {
-        name: "huge".into(),
-        vram_gb: 40.0,
-        ram_gb: 40.0,
-        priority: Priority::Normal,
-        exclusive: true,
-        slots: 1,
-        keep_warm: true,
-        gpu: None,
-        gpus: vec![0, 1],
-    };
-    let mut s = Scheduler::new(two_gpu_resources(), vec![huge, indexer()]).unwrap();
+    let mut small = indexer();
+    small.vram_gb = 5.0;
+    small.ram_gb = 5.0;
+    let mut s = Scheduler::new(two_gpu_resources(), vec![split_huge(), small]).unwrap();
     assert!(started(&s.submit("huge")));
     let r = s.submit("index");
     assert!(!started(&r));
     assert_eq!(s.queued("index"), 1);
     assert_eq!(s.tier("index"), Tier::Cupboard);
+}
+
+#[test]
+fn missing_listed_gpu_is_too_large() {
+    let mut huge = split_huge();
+    huge.gpus = vec![0, 99];
+    let mut s = Scheduler::new(two_gpu_resources(), vec![huge]).unwrap();
+    assert!(matches!(
+        s.submit("huge"),
+        SubmitResult::Rejected {
+            reason: silkai_sched::RejectReason::TooLarge
+        }
+    ));
+}
+
+#[test]
+fn split_on_single_card_resources_is_too_large() {
+    let mut s = Scheduler::new(Resources::single(29.0, 96.0), vec![split_huge()]).unwrap();
+    assert!(matches!(
+        s.submit("huge"),
+        SubmitResult::Rejected {
+            reason: silkai_sched::RejectReason::TooLarge
+        }
+    ));
+}
+
+#[test]
+fn single_id_gpus_list_is_not_a_pin() {
+    let mut index = indexer();
+    index.gpus = vec![1];
+    let mut s = Scheduler::new(two_gpu_resources(), vec![writer(), index]).unwrap();
+    s.submit("index");
+    assert_eq!(s.gpu_of("index"), Some(0));
+}
+
+#[test]
+fn split_list_wins_over_gpu_pin() {
+    let mut huge = split_huge();
+    huge.gpu = Some(1);
+    let mut s = Scheduler::new(two_gpu_resources(), vec![huge]).unwrap();
+    assert!(started(&s.submit("huge")));
+    assert_eq!(s.gpu_of("huge"), Some(0));
+    let st = s.status();
+    assert_eq!(st.gpus.iter().find(|g| g.id == 0).unwrap().used_gb, 20.0);
+    assert_eq!(st.gpus.iter().find(|g| g.id == 1).unwrap().used_gb, 20.0);
+}
+
+#[test]
+fn split_evicts_idle_copies_on_both_cards() {
+    let mut s = Scheduler::new(
+        two_gpu_resources(),
+        vec![pin_exclusive("a", 0), pin_exclusive("b", 1), split_huge()],
+    )
+    .unwrap();
+    let a = job_id(s.submit("a"));
+    let b = job_id(s.submit("b"));
+    s.finish(a);
+    s.finish(b);
+    assert_eq!(s.tier("a"), Tier::Bench);
+    assert_eq!(s.tier("b"), Tier::Bench);
+    match s.submit("huge") {
+        SubmitResult::Accepted { actions, .. } => {
+            assert!(actions
+                .iter()
+                .any(|act| matches!(act, Action::Sleep { model } if model == "a")));
+            assert!(actions
+                .iter()
+                .any(|act| matches!(act, Action::Sleep { model } if model == "b")));
+            assert!(actions
+                .iter()
+                .any(|act| matches!(act, Action::Start { model, .. } if model == "huge")));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.tier("huge"), Tier::Bench);
+    assert_eq!(s.tier("a"), Tier::Shelf);
+    assert_eq!(s.tier("b"), Tier::Shelf);
+}
+
+#[test]
+fn exclusive_split_preempts_running_neighbors_on_both_cards() {
+    let mut s = Scheduler::new(
+        two_gpu_resources(),
+        vec![pin_exclusive("a", 0), pin_exclusive("b", 1), split_huge()],
+    )
+    .unwrap();
+    let a = job_id(s.submit("a"));
+    let b = job_id(s.submit("b"));
+    match s.submit("huge") {
+        SubmitResult::Accepted { actions, .. } => {
+            assert!(actions
+                .iter()
+                .any(|act| matches!(act, Action::Preempt { job_id } if *job_id == a)));
+            assert!(actions
+                .iter()
+                .any(|act| matches!(act, Action::Preempt { job_id } if *job_id == b)));
+            assert!(actions
+                .iter()
+                .any(|act| matches!(act, Action::Start { model, .. } if model == "huge")));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.tier("huge"), Tier::Bench);
+    assert_eq!(s.queued("a"), 1);
+    assert_eq!(s.queued("b"), 1);
+}
+
+#[test]
+fn live_on_one_card_blocks_split_preempt() {
+    let mut huge = split_huge();
+    huge.priority = Priority::Live;
+    let talk = ModelSpec {
+        name: "talk".into(),
+        vram_gb: 8.0,
+        ram_gb: 8.0,
+        priority: Priority::Live,
+        exclusive: false,
+        slots: 1,
+        keep_warm: true,
+        gpu: Some(1),
+        gpus: Vec::new(),
+    };
+    let mut s = Scheduler::new(
+        two_gpu_resources(),
+        vec![pin_exclusive("write", 0), talk, huge],
+    )
+    .unwrap();
+    assert!(started(&s.submit("write")));
+    assert!(started(&s.submit("talk")));
+    let r = s.submit("huge");
+    match &r {
+        SubmitResult::Accepted { actions, .. } => {
+            assert!(!actions.iter().any(|a| matches!(a, Action::Preempt { .. })));
+            assert!(!started(&r));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.queued("huge"), 1);
+    assert_eq!(s.tier("write"), Tier::Bench);
+    assert_eq!(s.running("write"), 1);
+    assert_eq!(s.tier("talk"), Tier::Bench);
+    assert_eq!(s.running("talk"), 1);
 }

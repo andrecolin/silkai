@@ -415,7 +415,7 @@ impl Scheduler {
     fn preempt_and_place_split(&mut self, job_id: JobId, spec: &ModelSpec) -> Option<Vec<Action>> {
         let mut victims = Vec::new();
         for &gpu in &spec.gpus {
-            if !self.may_preempt_on(gpu, spec) {
+            if !self.may_preempt_on(gpu, spec) || !self.can_place_after_preempt_on(gpu, spec) {
                 return None;
             }
             victims.extend(self.preempt_victim_models_on(gpu, &spec.name));
