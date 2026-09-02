@@ -18,6 +18,7 @@ fn clinic_cfg() -> AppConfig {
             engine: "fake".into(),
             path: format!("/models/{}.bin", spec.name),
             url: None,
+            cmd: Vec::new(),
             transport: "http".into(),
             idle_timeout_secs: None,
             spec,
@@ -39,6 +40,7 @@ fn too_big() -> ConfiguredModel {
         engine: "fake".into(),
         path: "/models/too-big.bin".into(),
         url: None,
+        cmd: Vec::new(),
         transport: "http".into(),
         idle_timeout_secs: None,
         spec: ModelSpec {
@@ -154,6 +156,32 @@ async fn vllm_submit_streams_from_http_engine() {
     assert_eq!(out, "hello world");
 }
 
+fn process_soap_cfg(url: Option<&str>) -> AppConfig {
+    let mut cfg = clinic_cfg();
+    for model in &mut cfg.enabled {
+        if model.spec.name == "soap" {
+            model.engine = "process".into();
+            model.path = "Qwen/Qwen3-0.6B".into();
+            model.url = url.map(str::to_string);
+            model.cmd = vec!["sleep".into(), "30".into()];
+        }
+    }
+    cfg
+}
+
+#[tokio::test]
+async fn process_submit_streams_from_spawned_http() {
+    let url = spawn_vllm_mock().await;
+    let rt = Runtime::new(process_soap_cfg(Some(&url))).await.unwrap();
+    let (job, mut tokens) = rt.submit_chat("soap", "note").await.unwrap();
+    let mut out = String::new();
+    while let Some(t) = tokens.recv().await {
+        out.push_str(&t);
+    }
+    rt.finished(job).await;
+    assert_eq!(out, "hello world");
+}
+
 fn ollama_soap_cfg(url: Option<&str>) -> AppConfig {
     let mut cfg = clinic_cfg();
     for model in &mut cfg.enabled {
@@ -202,6 +230,7 @@ fn crashy_cfg(name: &str) -> AppConfig {
             engine: "fake".into(),
             path: format!("/models/{name}.bin"),
             url: None,
+            cmd: Vec::new(),
             transport: "http".into(),
             idle_timeout_secs: None,
             spec: ModelSpec {

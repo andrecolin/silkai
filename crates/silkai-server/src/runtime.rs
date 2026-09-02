@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
-use silkai_adapters::{Engine, EngineError, FakeEngine, LlamaEngine, OllamaEngine, VllmEngine};
+use silkai_adapters::{
+    Engine, EngineError, FakeEngine, LlamaEngine, OllamaEngine, ProcessEngine, VllmEngine,
+};
 use silkai_sched::{
     Action, JobId, RejectReason, SchedError, Scheduler, StatusSnapshot, SubmitResult,
 };
@@ -526,12 +528,13 @@ fn arc_engine(model: &ConfiguredModel) -> Option<Arc<dyn Engine>> {
         "llama.cpp" => Some(llama_engine(model)),
         "vllm" => Some(vllm_engine(model)),
         "ollama" => Some(ollama_engine(model)),
+        "process" => Some(process_engine(model)),
         _ => None,
     }
 }
 
 fn known_engine(engine: &str) -> bool {
-    matches!(engine, "fake" | "llama.cpp" | "vllm" | "ollama")
+    matches!(engine, "fake" | "llama.cpp" | "vllm" | "ollama" | "process")
 }
 
 fn transports_for(models: &[ConfiguredModel]) -> HashMap<String, String> {
@@ -572,6 +575,19 @@ fn ollama_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {
     Arc::new(OllamaEngine::new(&model.spec.name, model.spec.vram_gb, url))
 }
 
+fn process_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {
+    let url = model
+        .url
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:8000".into());
+    Arc::new(ProcessEngine::new(
+        &model.spec.name,
+        model.spec.vram_gb,
+        url,
+        model.cmd.clone(),
+    ))
+}
+
 fn warn_missing_llama() {
     if cfg!(feature = "llama") {
         return;
@@ -592,7 +608,7 @@ fn unavailable_set(models: &[ConfiguredModel]) -> HashSet<String> {
 
 fn engine_available(engine: &str) -> bool {
     match engine {
-        "fake" | "vllm" | "ollama" => true,
+        "fake" | "vllm" | "ollama" | "process" => true,
         "llama.cpp" => cfg!(feature = "llama"),
         _ => false,
     }

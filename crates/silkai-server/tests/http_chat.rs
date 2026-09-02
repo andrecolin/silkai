@@ -31,6 +31,7 @@ fn crashy_http_cfg() -> AppConfig {
             engine: "fake".into(),
             path: "/models/crashy-http.bin".into(),
             url: None,
+            cmd: Vec::new(),
             transport: "http".into(),
             idle_timeout_secs: None,
             spec: ModelSpec {

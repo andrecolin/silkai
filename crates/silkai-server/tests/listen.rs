@@ -15,6 +15,7 @@ fn clinic_cfg() -> AppConfig {
                 engine: "fake".into(),
                 path: format!("/models/{}.bin", spec.name),
                 url: None,
+                cmd: Vec::new(),
                 transport: "http".into(),
                 idle_timeout_secs: None,
                 spec,

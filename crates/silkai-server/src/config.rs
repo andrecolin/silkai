@@ -22,6 +22,7 @@ pub struct ConfiguredModel {
     pub engine: String,
     pub path: String,
     pub url: Option<String>,
+    pub cmd: Vec<String>,
     pub transport: String,
     pub idle_timeout_secs: Option<u64>,
 }
@@ -89,6 +90,8 @@ struct FileModel {
     gpu: Option<u32>,
     #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    cmd: Vec<String>,
 }
 
 pub fn load_from_str(s: &str) -> Result<AppConfig, ConfigError> {
@@ -282,6 +285,11 @@ fn split_models(
 }
 
 fn configured_model(name: String, m: FileModel) -> Result<ConfiguredModel, ConfigError> {
+    if m.engine == "process" && m.cmd.is_empty() {
+        return Err(ConfigError::Invalid(format!(
+            "model {name}: engine process requires cmd"
+        )));
+    }
     Ok(ConfiguredModel {
         spec: ModelSpec {
             name,
@@ -296,6 +304,7 @@ fn configured_model(name: String, m: FileModel) -> Result<ConfiguredModel, Confi
         engine: m.engine,
         path: m.path,
         url: m.url,
+        cmd: m.cmd,
         transport: m.transport,
         idle_timeout_secs: m.idle_timeout_secs,
     })

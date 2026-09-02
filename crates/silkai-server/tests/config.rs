@@ -160,6 +160,52 @@ exclusive = true
 }
 
 #[test]
+fn parses_process_engine_cmd() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+
+[resources]
+gpu_total_gb = 32
+gpu_headroom_gb = 3
+ram_total_gb = 128
+ram_headroom_gb = 32
+
+[models.write]
+engine = "process"
+path = "Qwen/Qwen3-0.6B"
+url = "http://127.0.0.1:8001"
+cmd = ["vllm", "serve", "Qwen/Qwen3-0.6B", "--port", "8001"]
+vram_gb = 28
+priority = "normal"
+exclusive = true
+"#;
+    let cfg = load_from_str(t).unwrap();
+    let write = cfg.enabled.iter().find(|m| m.spec.name == "write").unwrap();
+    assert_eq!(write.engine, "process");
+    assert_eq!(
+        write.cmd,
+        vec!["vllm", "serve", "Qwen/Qwen3-0.6B", "--port", "8001"]
+    );
+    assert_eq!(write.url.as_deref(), Some("http://127.0.0.1:8001"));
+}
+
+#[test]
+fn process_engine_without_cmd_errors() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+[resources]
+gpu_total_gb = 32
+ram_total_gb = 128
+[models.write]
+engine = "process"
+path = "Qwen/Qwen3-0.6B"
+vram_gb = 8
+priority = "normal"
+"#;
+    assert!(load_from_str(t).is_err());
+}
+
+#[test]
 fn missing_gpu_total_errors() {
     let t = r#"
 listen = "127.0.0.1:8080"

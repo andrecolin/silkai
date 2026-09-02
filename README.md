@@ -188,6 +188,17 @@ Load/wake POST `/api/generate` with `keep_alive = -1`. Sleep unloads with
 `keep_alive = 0` (Ollama has no RAM shelf). Chat is streaming `/api/chat`.
 SilkAI does not spawn or stop Ollama.
 
+`engine = "process"` starts and stops a child for you. Chat is the same
+OpenAI HTTP as vLLM (`/wake_up` on load, streaming `/v1/chat/completions`).
+Sleep kills the process (no RAM shelf):
+
+```toml
+engine = "process"
+path = "Qwen/Qwen3-0.6B"
+url = "http://127.0.0.1:8001"
+cmd = ["vllm", "serve", "Qwen/Qwen3-0.6B", "--port", "8001"]
+```
+
 ## Development
 
 ```bash

@@ -100,6 +100,7 @@ fn llama_model(
         engine: "llama.cpp".into(),
         path,
         url: None,
+        cmd: Vec::new(),
         transport: "http".into(),
         idle_timeout_secs: None,
     }
