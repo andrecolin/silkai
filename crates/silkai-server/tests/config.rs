@@ -108,6 +108,39 @@ gpu = 1
 }
 
 #[test]
+fn parses_split_gpus() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+
+[resources]
+ram_total_gb = 128
+ram_headroom_gb = 32
+
+[[resources.gpus]]
+id = 0
+total_gb = 32
+headroom_gb = 3
+
+[[resources.gpus]]
+id = 1
+total_gb = 32
+headroom_gb = 3
+
+[models.huge]
+engine = "fake"
+path = "/models/huge.gguf"
+vram_gb = 40
+priority = "normal"
+exclusive = true
+gpus = [0, 1]
+"#;
+    let cfg = load_from_str(t).unwrap();
+    let huge = cfg.enabled.iter().find(|m| m.spec.name == "huge").unwrap();
+    assert_eq!(huge.spec.gpus, vec![0, 1]);
+    assert!(huge.spec.is_split());
+}
+
+#[test]
 fn parses_vllm_engine_and_url() {
     let t = r#"
 listen = "127.0.0.1:8080"

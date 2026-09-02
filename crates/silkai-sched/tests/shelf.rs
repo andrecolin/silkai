@@ -66,6 +66,7 @@ fn keep_warm_false_goes_cupboard_on_evict() {
             slots: 1,
             keep_warm: false,
             gpu: None,
+            gpus: Vec::new(),
         },
         ModelSpec {
             name: "big".into(),
@@ -76,6 +77,7 @@ fn keep_warm_false_goes_cupboard_on_evict() {
             slots: 1,
             keep_warm: true,
             gpu: None,
+            gpus: Vec::new(),
         },
     ];
     let mut s = Scheduler::new(clinic_resources(), models).unwrap();

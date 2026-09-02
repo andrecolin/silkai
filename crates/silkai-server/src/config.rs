@@ -89,6 +89,8 @@ struct FileModel {
     #[serde(default)]
     gpu: Option<u32>,
     #[serde(default)]
+    gpus: Vec<u32>,
+    #[serde(default)]
     url: Option<String>,
     #[serde(default)]
     cmd: Vec<String>,
@@ -125,7 +127,7 @@ fn app_config(
     probed_ram_gb: Option<f64>,
 ) -> Result<AppConfig, ConfigError> {
     let resources = sched_resources(&file.resources, probed_gpus, probed_ram_gb)?;
-    let (enabled, disabled) = split_models(file.models, resources.max_schedulable())?;
+    let (enabled, disabled) = split_models(file.models, &resources)?;
     Ok(AppConfig {
         listen: file.listen,
         prefetch_on_start: file.resources.prefetch_on_start,
@@ -269,19 +271,36 @@ fn probe_nvidia() -> Option<Vec<(u32, f64)>> {
 
 fn split_models(
     models: HashMap<String, FileModel>,
-    gpu_schedulable_gb: f64,
+    resources: &Resources,
 ) -> Result<(Vec<ConfiguredModel>, Vec<ConfiguredModel>), ConfigError> {
     let mut enabled = Vec::new();
     let mut disabled = Vec::new();
     for (name, model) in models {
         let configured = configured_model(name, model)?;
-        if configured.spec.vram_gb > gpu_schedulable_gb {
+        if configured.spec.slice_vram() > limit_for(&configured.spec, resources) {
             disabled.push(configured);
         } else {
             enabled.push(configured);
         }
     }
     Ok((enabled, disabled))
+}
+
+fn limit_for(spec: &ModelSpec, resources: &Resources) -> f64 {
+    if spec.is_split() {
+        let benches = resources.benches();
+        spec.gpus
+            .iter()
+            .filter_map(|id| {
+                benches
+                    .iter()
+                    .find(|g| g.id == *id)
+                    .map(|g| g.schedulable_gb)
+            })
+            .fold(f64::INFINITY, f64::min)
+    } else {
+        resources.max_schedulable()
+    }
 }
 
 fn configured_model(name: String, m: FileModel) -> Result<ConfiguredModel, ConfigError> {
@@ -300,6 +319,7 @@ fn configured_model(name: String, m: FileModel) -> Result<ConfiguredModel, Confi
             slots: m.slots,
             keep_warm: m.keep_warm,
             gpu: m.gpu,
+            gpus: m.gpus,
         },
         engine: m.engine,
         path: m.path,

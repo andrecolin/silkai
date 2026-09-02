@@ -29,6 +29,7 @@ fn writer() -> ModelSpec {
         slots: 1,
         keep_warm: true,
         gpu: None,
+        gpus: Vec::new(),
     }
 }
 
@@ -42,6 +43,7 @@ fn indexer() -> ModelSpec {
         slots: 1,
         keep_warm: true,
         gpu: None,
+        gpus: Vec::new(),
     }
 }
 
@@ -55,11 +57,7 @@ fn started(r: &SubmitResult) -> bool {
 
 #[test]
 fn eighty_and_thirty_do_not_fit_one_gpu() {
-    let mut s = Scheduler::new(
-        Resources::single(29.0, 96.0),
-        vec![writer(), indexer()],
-    )
-    .unwrap();
+    let mut s = Scheduler::new(Resources::single(29.0, 96.0), vec![writer(), indexer()]).unwrap();
     assert!(started(&s.submit("write")));
     let r = s.submit("index");
     assert!(matches!(r, SubmitResult::Accepted { .. }));
@@ -131,6 +129,7 @@ fn bigger_than_every_gpu_is_too_large() {
         slots: 1,
         keep_warm: true,
         gpu: None,
+        gpus: Vec::new(),
     };
     let mut s = Scheduler::new(two_gpu_resources(), vec![huge]).unwrap();
     assert!(matches!(
@@ -139,4 +138,49 @@ fn bigger_than_every_gpu_is_too_large() {
             reason: silkai_sched::RejectReason::TooLarge
         }
     ));
+}
+
+#[test]
+fn forty_gb_split_runs_on_two_29gb_cards() {
+    let huge = ModelSpec {
+        name: "huge".into(),
+        vram_gb: 40.0,
+        ram_gb: 40.0,
+        priority: Priority::Normal,
+        exclusive: true,
+        slots: 1,
+        keep_warm: true,
+        gpu: None,
+        gpus: vec![0, 1],
+    };
+    let mut s = Scheduler::new(two_gpu_resources(), vec![huge]).unwrap();
+    assert!(started(&s.submit("huge")));
+    assert_eq!(s.tier("huge"), Tier::Bench);
+    assert_eq!(s.gpu_of("huge"), Some(0));
+    let st = s.status();
+    let g0 = st.gpus.iter().find(|g| g.id == 0).unwrap();
+    let g1 = st.gpus.iter().find(|g| g.id == 1).unwrap();
+    assert_eq!(g0.used_gb, 20.0);
+    assert_eq!(g1.used_gb, 20.0);
+}
+
+#[test]
+fn exclusive_split_blocks_both_cards() {
+    let huge = ModelSpec {
+        name: "huge".into(),
+        vram_gb: 40.0,
+        ram_gb: 40.0,
+        priority: Priority::Normal,
+        exclusive: true,
+        slots: 1,
+        keep_warm: true,
+        gpu: None,
+        gpus: vec![0, 1],
+    };
+    let mut s = Scheduler::new(two_gpu_resources(), vec![huge, indexer()]).unwrap();
+    assert!(started(&s.submit("huge")));
+    let r = s.submit("index");
+    assert!(!started(&r));
+    assert_eq!(s.queued("index"), 1);
+    assert_eq!(s.tier("index"), Tier::Cupboard);
 }

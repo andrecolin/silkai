@@ -8,7 +8,8 @@ Several GPUs are several benches and the same RAM shelf. An ~80% model and an
 ~30% model run at the same time if they sit on **different** cards. On one
 card they still do not fit. **Exclusive** means that card is alone, not the
 whole machine. List cards under `[[resources.gpus]]` and optionally pin a
-model with `gpu = 1`.
+model with `gpu = 1`. A model that must occupy several cards at once uses
+`gpus = [0, 1]`; `vram_gb` is split evenly across those benches.
 
 ![128 GB RAM keeps three models warm; the 32 GB GPU holds only the model that is working, plus a small slice for the desktop](docs/silkai-memory.svg)
 

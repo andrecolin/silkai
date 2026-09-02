@@ -63,6 +63,7 @@ fn model_bigger_than_gpu_is_rejected() {
             slots: 1,
             keep_warm: true,
             gpu: None,
+            gpus: Vec::new(),
         }],
     )
     .unwrap();

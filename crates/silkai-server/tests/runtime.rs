@@ -52,6 +52,7 @@ fn too_big() -> ConfiguredModel {
             slots: 1,
             keep_warm: true,
             gpu: None,
+            gpus: Vec::new(),
         },
     }
 }
@@ -242,6 +243,7 @@ fn crashy_cfg(name: &str) -> AppConfig {
                 slots: 1,
                 keep_warm: true,
                 gpu: None,
+                gpus: Vec::new(),
             },
         }],
         disabled: vec![],

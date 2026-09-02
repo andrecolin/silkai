@@ -21,6 +21,7 @@ request_timeout_secs = 600
 # id = 1
 # total_gb = 32
 # headroom_gb = 3
+# One model on both cards (layer/tensor split): gpus = [0, 1]
 
 # Live speech-to-text: two people can share this copy.
 [models.transcribe]

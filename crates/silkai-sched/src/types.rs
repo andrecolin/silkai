@@ -67,6 +67,21 @@ pub struct ModelSpec {
     pub slots: u32,
     pub keep_warm: bool,
     pub gpu: Option<u32>,
+    pub gpus: Vec<u32>,
+}
+
+impl ModelSpec {
+    pub fn is_split(&self) -> bool {
+        self.gpus.len() >= 2
+    }
+
+    pub fn slice_vram(&self) -> f64 {
+        if self.is_split() {
+            self.vram_gb / self.gpus.len() as f64
+        } else {
+            self.vram_gb
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

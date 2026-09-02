@@ -18,7 +18,7 @@ pub struct Scheduler {
     tiers: HashMap<String, Tier>,
     running: HashMap<String, u32>,
     jobs: HashMap<JobId, String>,
-    on_gpu: HashMap<String, u32>,
+    on_gpu: HashMap<String, Vec<u32>>,
     queue: VecDeque<(JobId, String)>,
     idle_since: HashMap<String, u64>,
     idle_tick: u64,
@@ -136,14 +136,21 @@ impl Scheduler {
     }
 
     pub fn gpu_of(&self, model: &str) -> Option<u32> {
-        self.on_gpu.get(model).copied()
+        self.on_gpu.get(model).and_then(|g| g.first().copied())
+    }
+
+    fn occupies(&self, model: &str, gpu: u32) -> bool {
+        self.on_gpu.get(model).is_some_and(|ids| ids.contains(&gpu))
     }
 
     pub fn submit(&mut self, model: &str) -> SubmitResult {
         let Some(spec) = self.models.get(model).cloned() else {
             return rejected(RejectReason::UnknownModel);
         };
-        if spec.vram_gb > self.max_for(&spec) {
+        if spec.slice_vram() > self.max_for(&spec) {
+            return rejected(RejectReason::TooLarge);
+        }
+        if spec.is_split() && self.candidate_gpus(&spec).len() != spec.gpus.len() {
             return rejected(RejectReason::TooLarge);
         }
         let job_id = self.alloc_id();
@@ -241,6 +248,9 @@ impl Scheduler {
     }
 
     fn preempt_and_place(&mut self, job_id: JobId, spec: &ModelSpec) -> Option<Vec<Action>> {
+        if spec.is_split() {
+            return self.preempt_and_place_split(job_id, spec);
+        }
         for gpu in self.candidate_gpus(spec) {
             if !self.should_preempt_on(gpu.id, spec) {
                 continue;
@@ -280,9 +290,7 @@ impl Scheduler {
 
     fn has_running_live_on(&self, gpu: u32) -> bool {
         self.models.values().any(|m| {
-            m.priority == Priority::Live
-                && self.running(&m.name) > 0
-                && self.gpu_of(&m.name) == Some(gpu)
+            m.priority == Priority::Live && self.running(&m.name) > 0 && self.occupies(&m.name, gpu)
         })
     }
 
@@ -294,7 +302,7 @@ impl Scheduler {
         if stuck.iter().any(|n| self.is_exclusive(n)) {
             return false;
         }
-        let used: f64 = stuck.iter().map(|n| self.vram_gb(n)).sum();
+        let used: f64 = stuck.iter().map(|n| self.vram_on(n, gpu)).sum();
         used + self.added_vram(spec) <= self.schedulable(gpu)
     }
 
@@ -302,7 +310,7 @@ impl Scheduler {
         if self.tier(&spec.name) == Tier::Bench {
             0.0
         } else {
-            spec.vram_gb
+            spec.slice_vram()
         }
     }
 
@@ -372,17 +380,55 @@ impl Scheduler {
         if self.tier(&spec.name) == Tier::Bench {
             return self.start_if_slot_free(job_id, spec);
         }
+        if spec.is_split() {
+            return self.try_place_split(job_id, spec);
+        }
         for gpu in self.candidate_gpus(spec) {
-            if spec.vram_gb > gpu.schedulable_gb {
+            if spec.slice_vram() > gpu.schedulable_gb {
                 continue;
             }
             if let Some(victims) = self.idle_eviction_plan_on(gpu.id, spec) {
                 let mut actions = self.evict_idle(&victims);
-                actions.extend(self.bring_to_bench_and_start(job_id, spec, gpu.id));
+                actions.extend(self.bring_to_bench_and_start(job_id, spec, vec![gpu.id]));
                 return Some(actions);
             }
         }
         None
+    }
+
+    fn try_place_split(&mut self, job_id: JobId, spec: &ModelSpec) -> Option<Vec<Action>> {
+        let mut evict = Vec::new();
+        for &gpu in &spec.gpus {
+            if spec.slice_vram() > self.schedulable(gpu) {
+                return None;
+            }
+            let plan = self.idle_eviction_plan_on(gpu, spec)?;
+            evict.extend(plan);
+        }
+        evict.sort();
+        evict.dedup();
+        let mut actions = self.evict_idle(&evict);
+        actions.extend(self.bring_to_bench_and_start(job_id, spec, spec.gpus.clone()));
+        Some(actions)
+    }
+
+    fn preempt_and_place_split(&mut self, job_id: JobId, spec: &ModelSpec) -> Option<Vec<Action>> {
+        let mut victims = Vec::new();
+        for &gpu in &spec.gpus {
+            if !self.may_preempt_on(gpu, spec) {
+                return None;
+            }
+            victims.extend(self.preempt_victim_models_on(gpu, &spec.name));
+        }
+        victims.sort();
+        victims.dedup();
+        if victims.is_empty() {
+            return None;
+        }
+        let mut actions = self.preempt_models(&victims);
+        let rest = self.try_place_split(job_id, spec)?;
+        actions.extend(rest);
+        Some(actions)
     }
 
     fn start_if_slot_free(&mut self, job_id: JobId, spec: &ModelSpec) -> Option<Vec<Action>> {
@@ -397,19 +443,20 @@ impl Scheduler {
         &mut self,
         job_id: JobId,
         spec: &ModelSpec,
-        gpu: u32,
+        devices: Vec<u32>,
     ) -> Vec<Action> {
         let mut actions = self.demote_for_ram(spec);
-        actions.push(self.place_on_bench(spec, gpu));
+        actions.push(self.place_on_bench(spec, devices));
         self.mark_running(job_id, spec);
         actions.push(start_action(job_id, &spec.name));
         actions
     }
 
-    fn place_on_bench(&mut self, spec: &ModelSpec, gpu: u32) -> Action {
+    fn place_on_bench(&mut self, spec: &ModelSpec, devices: Vec<u32>) -> Action {
+        let gpu = devices.first().copied().unwrap_or(0);
         let from = self.tier(&spec.name);
         self.tiers.insert(spec.name.clone(), Tier::Bench);
-        self.on_gpu.insert(spec.name.clone(), gpu);
+        self.on_gpu.insert(spec.name.clone(), devices);
         match from {
             Tier::Shelf => Action::Wake {
                 model: spec.name.clone(),
@@ -608,9 +655,7 @@ impl Scheduler {
         self.models
             .keys()
             .filter(|name| {
-                *name != except
-                    && self.tier(name) == Tier::Bench
-                    && self.gpu_of(name) == Some(gpu)
+                *name != except && self.tier(name) == Tier::Bench && self.occupies(name, gpu)
             })
             .cloned()
             .collect()
@@ -642,6 +687,13 @@ impl Scheduler {
 
     fn candidate_gpus(&self, spec: &ModelSpec) -> Vec<crate::GpuBudget> {
         let all = self.resources.benches();
+        if spec.is_split() {
+            return spec
+                .gpus
+                .iter()
+                .filter_map(|id| all.iter().find(|g| g.id == *id).cloned())
+                .collect();
+        }
         match spec.gpu {
             Some(id) => all.into_iter().filter(|g| g.id == id).collect(),
             None => all,
@@ -649,10 +701,12 @@ impl Scheduler {
     }
 
     fn max_for(&self, spec: &ModelSpec) -> f64 {
+        let fold = if spec.is_split() { f64::min } else { f64::max };
+        let start = if spec.is_split() { f64::INFINITY } else { 0.0 };
         self.candidate_gpus(spec)
             .iter()
             .map(|g| g.schedulable_gb)
-            .fold(0.0, f64::max)
+            .fold(start, fold)
     }
 
     fn schedulable(&self, gpu: u32) -> f64 {
@@ -667,8 +721,8 @@ impl Scheduler {
     fn gpu_used_on(&self, gpu: u32) -> f64 {
         self.models
             .values()
-            .filter(|m| self.tier(&m.name) == Tier::Bench && self.gpu_of(&m.name) == Some(gpu))
-            .map(|m| m.vram_gb)
+            .filter(|m| self.tier(&m.name) == Tier::Bench && self.occupies(&m.name, gpu))
+            .map(|m| m.slice_vram())
             .sum()
     }
 
@@ -698,16 +752,19 @@ impl Scheduler {
     }
 
     fn fits_on(&self, gpu: u32, spec: &ModelSpec) -> bool {
-        self.gpu_used_on(gpu) + spec.vram_gb <= self.schedulable(gpu)
+        self.gpu_used_on(gpu) + spec.slice_vram() <= self.schedulable(gpu)
     }
 
     fn fits_after_on(&self, gpu: u32, evict: &[String], spec: &ModelSpec) -> bool {
-        let freed: f64 = evict.iter().map(|n| self.vram_gb(n)).sum();
-        self.gpu_used_on(gpu) - freed + spec.vram_gb <= self.schedulable(gpu)
+        let freed: f64 = evict.iter().map(|n| self.vram_on(n, gpu)).sum();
+        self.gpu_used_on(gpu) - freed + spec.slice_vram() <= self.schedulable(gpu)
     }
 
-    fn vram_gb(&self, name: &str) -> f64 {
-        self.models.get(name).map(|m| m.vram_gb).unwrap_or(0.0)
+    fn vram_on(&self, name: &str, gpu: u32) -> f64 {
+        if !self.occupies(name, gpu) {
+            return 0.0;
+        }
+        self.models.get(name).map(|m| m.slice_vram()).unwrap_or(0.0)
     }
 
     fn mark_running(&mut self, job_id: JobId, spec: &ModelSpec) {

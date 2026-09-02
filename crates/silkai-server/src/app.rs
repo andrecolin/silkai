@@ -375,6 +375,7 @@ fn too_big() -> ConfiguredModel {
         slots: 1,
         keep_warm: true,
         gpu: None,
+        gpus: Vec::new(),
     })
 }
 

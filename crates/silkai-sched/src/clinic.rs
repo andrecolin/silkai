@@ -15,6 +15,7 @@ pub fn clinic_models() -> Vec<ModelSpec> {
             slots: 2,
             keep_warm: true,
             gpu: None,
+            gpus: Vec::new(),
         },
         ModelSpec {
             name: "soap".into(),
@@ -25,6 +26,7 @@ pub fn clinic_models() -> Vec<ModelSpec> {
             slots: 1,
             keep_warm: true,
             gpu: None,
+            gpus: Vec::new(),
         },
         ModelSpec {
             name: "chart-scan".into(),
@@ -35,6 +37,7 @@ pub fn clinic_models() -> Vec<ModelSpec> {
             slots: 1,
             keep_warm: true,
             gpu: None,
+            gpus: Vec::new(),
         },
     ]
 }

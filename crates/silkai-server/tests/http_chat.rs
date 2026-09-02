@@ -43,6 +43,7 @@ fn crashy_http_cfg() -> AppConfig {
                 slots: 1,
                 keep_warm: true,
                 gpu: None,
+                gpus: Vec::new(),
             },
         }],
         disabled: vec![],

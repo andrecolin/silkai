@@ -96,6 +96,7 @@ fn llama_model(
             slots: 1,
             keep_warm: true,
             gpu: None,
+            gpus: Vec::new(),
         },
         engine: "llama.cpp".into(),
         path,

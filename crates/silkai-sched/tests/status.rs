@@ -44,6 +44,7 @@ fn status_lists_used_per_gpu() {
         slots: 1,
         keep_warm: true,
         gpu: None,
+        gpus: Vec::new(),
     };
     let index = ModelSpec {
         name: "index".into(),
@@ -54,6 +55,7 @@ fn status_lists_used_per_gpu() {
         slots: 1,
         keep_warm: true,
         gpu: None,
+        gpus: Vec::new(),
     };
     let mut s = Scheduler::new(resources, vec![write, index]).unwrap();
     s.submit("write");
