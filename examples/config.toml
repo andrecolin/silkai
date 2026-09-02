@@ -8,6 +8,7 @@ gpu_total_gb = 32
 # Omit gpu_total_gb and [[resources.gpus]] to probe NVIDIA cards via nvidia-smi.
 gpu_headroom_gb = 3
 ram_total_gb = 128
+# Omit ram_total_gb to probe MemTotal (/proc/meminfo) or sysctl hw.memsize.
 ram_headroom_gb = 32
 prefetch_on_start = true
 request_timeout_secs = 600

@@ -118,7 +118,9 @@ silkai
 Config is `~/.config/silkai/config.toml`, or `SILKAI_CONFIG`. The daemon
 listens on `127.0.0.1` only. If you omit `gpu_total_gb` and `[[resources.gpus]]`,
 SilkAI runs `nvidia-smi` and uses those cards (minus `gpu_headroom_gb` each).
-If the probe finds nothing, the daemon refuses to start.
+If you omit `ram_total_gb`, it reads `/proc/meminfo` (or `sysctl hw.memsize` on
+macOS) and subtracts `ram_headroom_gb`. If a probe finds nothing, the daemon
+refuses to start.
 
 ## Run from a checkout
 

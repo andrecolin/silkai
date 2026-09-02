@@ -1,5 +1,7 @@
 use silkai_sched::Priority;
-use silkai_server::config::{load_from_str, load_from_str_probed, parse_nvidia_smi};
+use silkai_server::config::{
+    load_from_str, load_from_str_probed, load_from_str_probed_ram, parse_meminfo, parse_nvidia_smi,
+};
 
 const TOML: &str = r#"
 listen = "127.0.0.1:8080"
@@ -214,4 +216,49 @@ ram_headroom_gb = 8
     let cfg = load_from_str_probed(t, vec![(0, 80.0)]).unwrap();
     assert!(cfg.resources.gpus.is_empty());
     assert_eq!(cfg.resources.gpu_schedulable_gb, 15.0);
+}
+
+#[test]
+fn parse_meminfo_kib_to_gb() {
+    let text = "MemTotal:       134217728 kB\nMemFree:        1000 kB\n";
+    assert_eq!(parse_meminfo(text).unwrap(), 128.0);
+}
+
+#[test]
+fn missing_ram_total_errors_without_probe() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+[resources]
+gpu_total_gb = 32
+gpu_headroom_gb = 3
+ram_headroom_gb = 32
+"#;
+    assert!(load_from_str(t).is_err());
+}
+
+#[test]
+fn probe_fills_ram_when_omitted() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+[resources]
+gpu_total_gb = 32
+gpu_headroom_gb = 3
+ram_headroom_gb = 32
+"#;
+    let cfg = load_from_str_probed_ram(t, 128.0).unwrap();
+    assert_eq!(cfg.resources.ram_shelf_gb, 96.0);
+}
+
+#[test]
+fn explicit_ram_total_ignores_probe() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+[resources]
+gpu_total_gb = 16
+gpu_headroom_gb = 1
+ram_total_gb = 64
+ram_headroom_gb = 8
+"#;
+    let cfg = load_from_str_probed_ram(t, 256.0).unwrap();
+    assert_eq!(cfg.resources.ram_shelf_gb, 56.0);
 }

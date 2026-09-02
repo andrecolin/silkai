@@ -50,7 +50,7 @@ struct FileResources {
     gpu_total_gb: Option<f64>,
     #[serde(default)]
     gpu_headroom_gb: f64,
-    ram_total_gb: f64,
+    ram_total_gb: Option<f64>,
     #[serde(default)]
     ram_headroom_gb: f64,
     #[serde(default = "default_prefetch")]
@@ -92,24 +92,36 @@ struct FileModel {
 }
 
 pub fn load_from_str(s: &str) -> Result<AppConfig, ConfigError> {
-    load(s, None)
+    load(s, None, None)
 }
 
 pub fn load_from_str_probed(s: &str, probed: Vec<(u32, f64)>) -> Result<AppConfig, ConfigError> {
-    load(s, Some(probed))
+    load(s, Some(probed), None)
+}
+
+pub fn load_from_str_probed_ram(s: &str, ram_gb: f64) -> Result<AppConfig, ConfigError> {
+    load(s, None, Some(ram_gb))
 }
 
 pub fn load_from_path(path: impl AsRef<Path>) -> Result<AppConfig, ConfigError> {
-    load(&std::fs::read_to_string(path)?, probe_nvidia())
+    load(&std::fs::read_to_string(path)?, probe_nvidia(), probe_ram())
 }
 
-fn load(s: &str, probed: Option<Vec<(u32, f64)>>) -> Result<AppConfig, ConfigError> {
+fn load(
+    s: &str,
+    probed_gpus: Option<Vec<(u32, f64)>>,
+    probed_ram_gb: Option<f64>,
+) -> Result<AppConfig, ConfigError> {
     let file: FileConfig = toml::from_str(s)?;
-    app_config(file, probed)
+    app_config(file, probed_gpus, probed_ram_gb)
 }
 
-fn app_config(file: FileConfig, probed: Option<Vec<(u32, f64)>>) -> Result<AppConfig, ConfigError> {
-    let resources = sched_resources(&file.resources, probed)?;
+fn app_config(
+    file: FileConfig,
+    probed_gpus: Option<Vec<(u32, f64)>>,
+    probed_ram_gb: Option<f64>,
+) -> Result<AppConfig, ConfigError> {
+    let resources = sched_resources(&file.resources, probed_gpus, probed_ram_gb)?;
     let (enabled, disabled) = split_models(file.models, resources.max_schedulable())?;
     Ok(AppConfig {
         listen: file.listen,
@@ -124,16 +136,20 @@ fn app_config(file: FileConfig, probed: Option<Vec<(u32, f64)>>) -> Result<AppCo
 
 fn sched_resources(
     r: &FileResources,
-    probed: Option<Vec<(u32, f64)>>,
+    probed_gpus: Option<Vec<(u32, f64)>>,
+    probed_ram_gb: Option<f64>,
 ) -> Result<Resources, ConfigError> {
-    let ram_shelf_gb = r.ram_total_gb - r.ram_headroom_gb;
+    let ram_total_gb = r.ram_total_gb.or(probed_ram_gb).ok_or_else(|| {
+        ConfigError::Invalid("resources.ram_total_gb is required (RAM probe found nothing)".into())
+    })?;
+    let ram_shelf_gb = ram_total_gb - r.ram_headroom_gb;
     if !r.gpus.is_empty() {
         return Ok(resources_from_file_gpus(&r.gpus, ram_shelf_gb));
     }
     if let Some(total) = r.gpu_total_gb {
         return Ok(Resources::single(total - r.gpu_headroom_gb, ram_shelf_gb));
     }
-    if let Some(probed) = probed.filter(|g| !g.is_empty()) {
+    if let Some(probed) = probed_gpus.filter(|g| !g.is_empty()) {
         return Ok(resources_from_probe(
             probed,
             r.gpu_headroom_gb,
@@ -199,6 +215,39 @@ pub fn parse_nvidia_smi(text: &str) -> Result<Vec<(u32, f64)>, ConfigError> {
         return Err(ConfigError::Invalid("nvidia-smi listed no GPUs".into()));
     }
     Ok(gpus)
+}
+
+pub fn parse_meminfo(text: &str) -> Result<f64, ConfigError> {
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("MemTotal:") else {
+            continue;
+        };
+        let kib: f64 = rest
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| ConfigError::Invalid(format!("bad MemTotal line: {line}")))?;
+        return Ok(kib / 1024.0 / 1024.0);
+    }
+    Err(ConfigError::Invalid("MemTotal missing from meminfo".into()))
+}
+
+fn probe_ram() -> Option<f64> {
+    if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+        if let Ok(gb) = parse_meminfo(&text) {
+            return Some(gb);
+        }
+    }
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let bytes: f64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    Some(bytes / 1024.0 / 1024.0 / 1024.0)
 }
 
 fn probe_nvidia() -> Option<Vec<(u32, f64)>> {
