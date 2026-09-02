@@ -1,5 +1,5 @@
 use silkai_sched::Priority;
-use silkai_server::config::load_from_str;
+use silkai_server::config::{load_from_str, load_from_str_probed, parse_nvidia_smi};
 
 const TOML: &str = r#"
 listen = "127.0.0.1:8080"
@@ -167,4 +167,51 @@ ram_headroom_gb = 32
 ram_total_gb = 128
 "#;
     assert!(load_from_str(t).is_err());
+}
+
+#[test]
+fn parse_nvidia_smi_two_cards_mib() {
+    let gpus = parse_nvidia_smi("0, 32768\n1, 24576\n").unwrap();
+    assert_eq!(gpus, vec![(0, 32.0), (1, 24.0)]);
+}
+
+#[test]
+fn probe_fills_gpus_when_totals_omitted() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+
+[resources]
+gpu_headroom_gb = 3
+ram_total_gb = 128
+ram_headroom_gb = 32
+
+[models.write]
+engine = "fake"
+path = "/models/write.gguf"
+vram_gb = 26
+priority = "normal"
+exclusive = true
+"#;
+    let cfg = load_from_str_probed(t, vec![(0, 32.0), (1, 32.0)]).unwrap();
+    assert_eq!(cfg.resources.gpus.len(), 2);
+    assert_eq!(cfg.resources.gpus[0].id, 0);
+    assert_eq!(cfg.resources.gpus[0].schedulable_gb, 29.0);
+    assert_eq!(cfg.resources.gpus[1].schedulable_gb, 29.0);
+    assert!(cfg.enabled.iter().any(|m| m.spec.name == "write"));
+}
+
+#[test]
+fn explicit_gpu_total_ignores_probe() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+
+[resources]
+gpu_total_gb = 16
+gpu_headroom_gb = 1
+ram_total_gb = 64
+ram_headroom_gb = 8
+"#;
+    let cfg = load_from_str_probed(t, vec![(0, 80.0)]).unwrap();
+    assert!(cfg.resources.gpus.is_empty());
+    assert_eq!(cfg.resources.gpu_schedulable_gb, 15.0);
 }

@@ -5,6 +5,7 @@ listen = "127.0.0.1:8080"
 
 [resources]
 gpu_total_gb = 32
+# Omit gpu_total_gb and [[resources.gpus]] to probe NVIDIA cards via nvidia-smi.
 gpu_headroom_gb = 3
 ram_total_gb = 128
 ram_headroom_gb = 32

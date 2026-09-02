@@ -92,16 +92,24 @@ struct FileModel {
 }
 
 pub fn load_from_str(s: &str) -> Result<AppConfig, ConfigError> {
-    let file: FileConfig = toml::from_str(s)?;
-    app_config(file)
+    load(s, None)
+}
+
+pub fn load_from_str_probed(s: &str, probed: Vec<(u32, f64)>) -> Result<AppConfig, ConfigError> {
+    load(s, Some(probed))
 }
 
 pub fn load_from_path(path: impl AsRef<Path>) -> Result<AppConfig, ConfigError> {
-    load_from_str(&std::fs::read_to_string(path)?)
+    load(&std::fs::read_to_string(path)?, probe_nvidia())
 }
 
-fn app_config(file: FileConfig) -> Result<AppConfig, ConfigError> {
-    let resources = sched_resources(&file.resources)?;
+fn load(s: &str, probed: Option<Vec<(u32, f64)>>) -> Result<AppConfig, ConfigError> {
+    let file: FileConfig = toml::from_str(s)?;
+    app_config(file, probed)
+}
+
+fn app_config(file: FileConfig, probed: Option<Vec<(u32, f64)>>) -> Result<AppConfig, ConfigError> {
+    let resources = sched_resources(&file.resources, probed)?;
     let (enabled, disabled) = split_models(file.models, resources.max_schedulable())?;
     Ok(AppConfig {
         listen: file.listen,
@@ -114,30 +122,97 @@ fn app_config(file: FileConfig) -> Result<AppConfig, ConfigError> {
     })
 }
 
-fn sched_resources(r: &FileResources) -> Result<Resources, ConfigError> {
+fn sched_resources(
+    r: &FileResources,
+    probed: Option<Vec<(u32, f64)>>,
+) -> Result<Resources, ConfigError> {
     let ram_shelf_gb = r.ram_total_gb - r.ram_headroom_gb;
     if !r.gpus.is_empty() {
-        let gpus: Vec<GpuBudget> = r
-            .gpus
-            .iter()
-            .map(|g| GpuBudget {
-                id: g.id,
-                schedulable_gb: g.total_gb - g.headroom_gb,
-            })
-            .collect();
-        let gpu_schedulable_gb = gpus.iter().map(|g| g.schedulable_gb).fold(0.0, f64::max);
-        return Ok(Resources {
-            gpu_schedulable_gb,
-            ram_shelf_gb,
-            gpus,
-        });
+        return Ok(resources_from_file_gpus(&r.gpus, ram_shelf_gb));
     }
-    let Some(total) = r.gpu_total_gb else {
-        return Err(ConfigError::Invalid(
-            "resources.gpu_total_gb or resources.gpus is required".into(),
+    if let Some(total) = r.gpu_total_gb {
+        return Ok(Resources::single(total - r.gpu_headroom_gb, ram_shelf_gb));
+    }
+    if let Some(probed) = probed.filter(|g| !g.is_empty()) {
+        return Ok(resources_from_probe(
+            probed,
+            r.gpu_headroom_gb,
+            ram_shelf_gb,
         ));
-    };
-    Ok(Resources::single(total - r.gpu_headroom_gb, ram_shelf_gb))
+    }
+    Err(ConfigError::Invalid(
+        "resources.gpu_total_gb or resources.gpus is required (GPU probe found nothing)".into(),
+    ))
+}
+
+fn resources_from_file_gpus(gpus: &[FileGpu], ram_shelf_gb: f64) -> Resources {
+    let gpus: Vec<GpuBudget> = gpus
+        .iter()
+        .map(|g| GpuBudget {
+            id: g.id,
+            schedulable_gb: g.total_gb - g.headroom_gb,
+        })
+        .collect();
+    resources_with_gpus(gpus, ram_shelf_gb)
+}
+
+fn resources_from_probe(probed: Vec<(u32, f64)>, headroom_gb: f64, ram_shelf_gb: f64) -> Resources {
+    let gpus: Vec<GpuBudget> = probed
+        .into_iter()
+        .map(|(id, total_gb)| GpuBudget {
+            id,
+            schedulable_gb: total_gb - headroom_gb,
+        })
+        .collect();
+    resources_with_gpus(gpus, ram_shelf_gb)
+}
+
+fn resources_with_gpus(gpus: Vec<GpuBudget>, ram_shelf_gb: f64) -> Resources {
+    let gpu_schedulable_gb = gpus.iter().map(|g| g.schedulable_gb).fold(0.0, f64::max);
+    Resources {
+        gpu_schedulable_gb,
+        ram_shelf_gb,
+        gpus,
+    }
+}
+
+pub fn parse_nvidia_smi(text: &str) -> Result<Vec<(u32, f64)>, ConfigError> {
+    let mut gpus = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split(',');
+        let id = parts
+            .next()
+            .and_then(|s| s.trim().parse().ok())
+            .ok_or_else(|| ConfigError::Invalid(format!("bad nvidia-smi line: {line}")))?;
+        let mem = parts
+            .next()
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse::<f64>().ok())
+            .ok_or_else(|| ConfigError::Invalid(format!("bad nvidia-smi line: {line}")))?;
+        gpus.push((id, mem / 1024.0));
+    }
+    if gpus.is_empty() {
+        return Err(ConfigError::Invalid("nvidia-smi listed no GPUs".into()));
+    }
+    Ok(gpus)
+}
+
+fn probe_nvidia() -> Option<Vec<(u32, f64)>> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=index,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_nvidia_smi(&String::from_utf8_lossy(&out.stdout)).ok()
 }
 
 fn split_models(
