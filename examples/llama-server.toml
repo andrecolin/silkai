@@ -1,0 +1,64 @@
+# Three llama.cpp servers on one card, started and stopped by SilkAI.
+#
+# This is the quickest real-GPU setup: build llama.cpp once
+# (https://github.com/ggml-org/llama.cpp), then point every model's `cmd` at
+# `llama-server`. No `--features` needed on SilkAI itself. Copy to
+# ~/.config/silkai/config.toml and edit the paths.
+#
+# Tested on a 32 GB card: the 1.5B and 4B models share the GPU; the 27B
+# writer needs it alone, so SilkAI kills the small children, starts the big
+# one, and brings the small ones back afterwards.
+
+listen = "127.0.0.1:8080"
+
+[resources]
+# gpu_total_gb and ram_total_gb are probed (nvidia-smi, /proc/meminfo).
+gpu_headroom_gb = 4
+ram_headroom_gb = 32
+prefetch_on_start = true
+request_timeout_secs = 600
+
+# Live: small, shareable, always warm, takes a session socket.
+[models.transcribe]
+engine = "process"
+path = "transcribe"                       # the --alias below
+url = "http://127.0.0.1:8101"             # must match --port
+cmd = ["llama-server",
+       "--model", "/models/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+       "--alias", "transcribe", "--host", "127.0.0.1", "--port", "8101",
+       "--ctx-size", "8192", "--parallel", "2", "--n-gpu-layers", "999",
+       "--jinja", "--no-webui"]
+vram_gb = 3
+priority = "live"
+slots = 2                                  # matches --parallel
+transport = "both"
+idle_timeout_secs = 60
+
+# Big writer: needs the card to itself.
+[models.write]
+engine = "process"
+path = "write"
+url = "http://127.0.0.1:8102"
+cmd = ["llama-server",
+       "--model", "/models/Qwen3-27B-Q5_K_XL.gguf",
+       "--alias", "write", "--host", "127.0.0.1", "--port", "8102",
+       "--ctx-size", "16384", "--n-gpu-layers", "999",
+       "--jinja", "--reasoning-budget", "0", "--no-webui"]
+vram_gb = 26
+priority = "normal"
+exclusive = true
+
+# Background tagger: fills leftover space, leaves first.
+[models.index]
+engine = "process"
+path = "index"
+url = "http://127.0.0.1:8103"
+cmd = ["llama-server",
+       "--model", "/models/Qwen3-4B-Q4_K_M.gguf",
+       "--alias", "index", "--host", "127.0.0.1", "--port", "8103",
+       "--ctx-size", "8192", "--n-gpu-layers", "999", "--jinja",
+       "--reasoning-budget", "0",
+       "--chat-template-kwargs", "{\"enable_thinking\":false}",
+       "--no-webui"]
+vram_gb = 5
+priority = "background"

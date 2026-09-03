@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Engine, EngineError};
+use crate::{last_content, ChatMessage, Engine, EngineError};
 
 fn fail_next() -> &'static Mutex<HashMap<String, FailNext>> {
     static MAP: OnceLock<Mutex<HashMap<String, FailNext>>> = OnceLock::new();
@@ -139,7 +139,7 @@ impl Engine for FakeEngine {
 
     async fn run(
         &self,
-        prompt: &str,
+        messages: &[ChatMessage],
         prefix: &str,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError> {
@@ -149,7 +149,8 @@ impl Engine for FakeEngine {
         if self.tier() != Tier::Bench {
             return Err(EngineError::NotLoaded);
         }
-        Ok(spawn_chunks(prompt.to_string(), prefix.to_string(), cancel))
+        let prompt = last_content(messages).to_string();
+        Ok(spawn_chunks(prompt, prefix.to_string(), cancel))
     }
 
     fn measured_vram_gb(&self) -> f64 {
@@ -232,7 +233,10 @@ mod tests {
         let e = FakeEngine::new("soap", 28.0);
         e.load("/x", 0).await.unwrap();
         let cancel = CancellationToken::new();
-        let mut rx = e.run("hello", "", cancel).await.unwrap();
+        let mut rx = e
+            .run(&[ChatMessage::user("hello")], "", cancel)
+            .await
+            .unwrap();
         let mut got = Vec::new();
         while let Some(t) = rx.recv().await {
             got.push(t);
@@ -246,7 +250,10 @@ mod tests {
         e.load("/x", 0).await.unwrap();
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let mut rx = e.run("hello", "", cancel).await.unwrap();
+        let mut rx = e
+            .run(&[ChatMessage::user("hello")], "", cancel)
+            .await
+            .unwrap();
         assert!(rx.recv().await.is_none());
     }
 
@@ -255,7 +262,11 @@ mod tests {
         let e = FakeEngine::new("soap", 28.0);
         e.load("/x", 0).await.unwrap();
         let mut rx = e
-            .run("hello", "hello", CancellationToken::new())
+            .run(
+                &[ChatMessage::user("hello")],
+                "hello",
+                CancellationToken::new(),
+            )
             .await
             .unwrap();
         let mut got = Vec::new();

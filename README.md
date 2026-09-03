@@ -108,6 +108,17 @@ FEATURES=llama,metal ./scripts/install.sh     # macOS (often already on by llama
 
 Pick **one** of `cuda`, `vulkan`, or `metal`. Do not pass `--all-features`.
 
+The `llama` build compiles llama.cpp from source (10 minutes or more) and
+needs cmake, a C++ compiler, and libclang headers for bindgen (on Ubuntu:
+`libclang-common-18-dev`, or whichever LLVM version you have). For `cuda`
+with Ubuntu's packaged toolkit the libraries live in
+`/usr/lib/x86_64-linux-gnu`, not in a `lib64` directory, so point the crate
+at a directory that has one: `mkdir -p ~/cuda && ln -s
+/usr/lib/x86_64-linux-gnu ~/cuda/lib64 && CUDA_LIBRARY_PATH=~/cuda ...`.
+A toolkit under `/usr/local/cuda` is found on its own. If you already have a
+llama.cpp build, `engine = "process"` with `llama-server` (below) skips all
+of this.
+
 Without the script:
 
 ```bash
@@ -140,6 +151,11 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"write","messages":[{"role":"user","content":"Summarize this meeting."}]}'
 ```
+
+The whole `messages` list reaches the engine: system prompts, history,
+and assistant turns are forwarded as sent (llama-server, vLLM, and Ollama
+apply the model's chat template; the in-process llama.cpp engine applies
+the GGUF's own template). `content` may be a string or a list of text parts.
 
 Streaming: `"stream": true` (SSE). Also `GET /v1/models` and `GET /v1/status`
 (models plus per-GPU `used_gb` / `schedulable_gb`). The daemon logs load, wake,
@@ -192,17 +208,24 @@ Load/wake POST `/api/generate` with `keep_alive = -1`. Sleep unloads with
 `keep_alive = 0` (Ollama has no RAM shelf). Chat is streaming `/api/chat`.
 SilkAI does not spawn or stop Ollama.
 
-`engine = "process"` starts and stops a child for you. Chat is the same
-OpenAI HTTP as vLLM (`/wake_up` on load, streaming `/v1/chat/completions`).
-Load waits until the child answers `/wake_up` (up to 60s). Sleep kills the
-process group (no RAM shelf):
+`engine = "process"` starts and stops a child for you. Anything that speaks
+OpenAI chat and answers `GET /health` works: `llama-server`, `vllm serve`,
+and similar. Load waits until `/health` returns 200 (llama-server says 503
+while the GGUF is still loading; up to 5 minutes). Chat is streaming
+`/v1/chat/completions`. Sleep kills the process group (no RAM shelf, the
+next wake is a fresh start). The child gets `CUDA_VISIBLE_DEVICES` set to
+the card the scheduler picked, and its stderr goes to SilkAI's log:
 
 ```toml
 engine = "process"
-path = "Qwen/Qwen3-0.6B"
-url = "http://127.0.0.1:8001"
-cmd = ["vllm", "serve", "Qwen/Qwen3-0.6B", "--port", "8001"]
+path = "write"                    # model name sent in the request (--alias)
+url = "http://127.0.0.1:8001"     # must match the child's port
+cmd = ["llama-server", "--model", "/models/write-q4.gguf", "--alias", "write",
+       "--port", "8001", "--n-gpu-layers", "999", "--jinja"]
 ```
+
+`examples/llama-server.toml` is a complete three-model setup on this
+pattern. It needs no `--features` on SilkAI; the GPU work is in llama.cpp.
 
 ## Development
 

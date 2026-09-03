@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use silkai_adapters::{Engine, EngineError, VllmEngine};
+use silkai_adapters::{ChatMessage, Engine, EngineError, VllmEngine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -39,7 +39,10 @@ async fn vllm_run_streams_sse_content() {
     let (url, log) = spawn_mock().await;
     let e = VllmEngine::new("write", 28.0, &url);
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
-    let mut rx = e.run("hello", "", CancellationToken::new()).await.unwrap();
+    let mut rx = e
+        .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
+        .await
+        .unwrap();
     let mut got = Vec::new();
     while let Some(t) = rx.recv().await {
         got.push(t);
@@ -50,11 +53,45 @@ async fn vllm_run_streams_sse_content() {
 }
 
 #[tokio::test]
+async fn vllm_forwards_every_message_and_prefix() {
+    let (url, log) = spawn_mock().await;
+    let e = VllmEngine::new("write", 28.0, &url);
+    e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
+    let chat = [
+        ChatMessage::system("You are terse."),
+        ChatMessage::user("hello"),
+    ];
+    let mut rx = e.run(&chat, "hel", CancellationToken::new()).await.unwrap();
+    while rx.recv().await.is_some() {}
+    let body = log
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|l| l.contains("/v1/chat/completions"))
+        .cloned()
+        .expect("chat request logged");
+    let json: serde_json::Value = serde_json::from_str(
+        body.split_once(' ')
+            .and_then(|(_, r)| r.split_once(' '))
+            .map(|(_, b)| b)
+            .unwrap(),
+    )
+    .unwrap();
+    let messages = json["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "You are terse.");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[2]["role"], "assistant");
+    assert_eq!(messages[2]["content"], "hel");
+}
+
+#[tokio::test]
 async fn vllm_run_without_load_is_not_loaded() {
     let (url, _) = spawn_mock().await;
     let e = VllmEngine::new("write", 28.0, &url);
     let err = e
-        .run("hello", "", CancellationToken::new())
+        .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotLoaded));
@@ -67,7 +104,7 @@ async fn vllm_run_after_sleep_is_not_loaded() {
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
     e.sleep().await.unwrap();
     let err = e
-        .run("hello", "", CancellationToken::new())
+        .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotLoaded));
@@ -80,7 +117,10 @@ async fn vllm_run_stops_on_cancel() {
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let mut rx = e.run("hello", "", cancel).await.unwrap();
+    let mut rx = e
+        .run(&[ChatMessage::user("hello")], "", cancel)
+        .await
+        .unwrap();
     assert!(rx.recv().await.is_none());
 }
 
