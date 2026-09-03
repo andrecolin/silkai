@@ -31,7 +31,7 @@ Three models are needed, and they will not all fit on the card together:
 
 | model | job | needs | policy |
 |---|---|---|---|
-| `whisper` | speech to text while the doctor dictates | about 12 GB | **live**: never interrupted, two people can share it |
+| `whisper` | speech to text while the doctor dictates | about 10 GB | **live**: never interrupted, two people can share it |
 | `soap` | turns the transcript into a SOAP note | about 80% of the card | **exclusive**: needs the card to itself |
 | `chart` | reads back through the chart for anything missed | a few GB | **background**: runs in leftover space, leaves first |
 
@@ -128,7 +128,7 @@ url = "http://127.0.0.1:8101"          # must match --port
 cmd = ["llama-server", "--model", "/models/whisper-large-medical.gguf",
        "--alias", "whisper", "--host", "127.0.0.1", "--port", "8101",
        "--n-gpu-layers", "999", "--parallel", "2", "--jinja"]
-vram_gb = 12
+vram_gb = 10
 priority = "live"
 slots = 2
 transport = "both"                     # HTTP and a session socket

@@ -34,7 +34,7 @@ cmd = ["llama-server",
        "--alias", "whisper", "--host", "127.0.0.1", "--port", "8101",
        "--ctx-size", "8192", "--parallel", "2", "--n-gpu-layers", "999",
        "--jinja", "--no-webui"]
-vram_gb = 12
+vram_gb = 10
 priority = "live"
 slots = 2                                  # matches --parallel
 transport = "both"

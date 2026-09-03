@@ -7,7 +7,7 @@
   <g>
     <rect x="36" y="80" width="200" height="88" rx="10" fill="#1a2330" stroke="#3d4f66"/>
     <text x="136" y="118" text-anchor="middle" fill="#9ecbff" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="600">whisper</text>
-    <text x="136" y="140" text-anchor="middle" fill="#8b9aab" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12">12 GB · live</text>
+    <text x="136" y="140" text-anchor="middle" fill="#8b9aab" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12">10 GB · live</text>
     <rect x="260" y="80" width="200" height="88" rx="10" fill="#1a2330" stroke="#3d4f66"/>
     <text x="360" y="118" text-anchor="middle" fill="#9ecbff" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" font-weight="600">soap</text>
     <text x="360" y="140" text-anchor="middle" fill="#8b9aab" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12">26 GB · exclusive</text>
