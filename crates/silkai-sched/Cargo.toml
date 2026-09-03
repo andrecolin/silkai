@@ -3,6 +3,7 @@ name = "silkai-sched"
 description = "GPU packing scheduler for SilkAI: decides which local models sit on the card, wait, or stay warm in RAM"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
