@@ -476,7 +476,7 @@ fn chat_error(err: RuntimeError) -> (StatusCode, String) {
         RuntimeError::Disabled | RuntimeError::TooLarge => StatusCode::BAD_REQUEST,
         RuntimeError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeError::NoWebsocket => StatusCode::NOT_FOUND,
-        RuntimeError::Engine(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        RuntimeError::Interrupted | RuntimeError::Engine(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, err.to_string())
 }
