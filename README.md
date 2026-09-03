@@ -26,6 +26,27 @@ model you name.
 
 [MIT](LICENSE) · [Ko-fi](https://ko-fi.com/andrecolin)
 
+## Quickstart
+
+Needs Rust 1.80+ and a [llama.cpp](https://github.com/ggml-org/llama.cpp)
+build with `llama-server` on your `PATH` (SilkAI starts and stops it for
+you; no CUDA build of SilkAI itself).
+
+```bash
+cargo install silkai --locked
+silkai init                                   # probes your GPU and RAM, writes ~/.config/silkai/config.toml
+$EDITOR ~/.config/silkai/config.toml          # point --model at a GGUF, set vram_gb
+silkai check                                  # verifies every path and prints the plan
+silkai                                        # runs; add [ui] enabled = true for http://127.0.0.1:8080/ui
+curl -s http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"chat","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Add more `[models.*]` blocks for more models; `examples/llama-server.toml`
+shows three sharing one card. The rest of this page explains what the
+daemon does with them.
+
 ## A simple workflow
 
 Your app does the talking. SilkAI only sees models and text.

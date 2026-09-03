@@ -266,6 +266,16 @@ pub fn parse_meminfo(text: &str) -> Result<f64, ConfigError> {
     Err(ConfigError::Invalid("MemTotal missing from meminfo".into()))
 }
 
+/// Total system RAM in GB, from `/proc/meminfo` or `sysctl hw.memsize`.
+pub fn probe_ram_gb() -> Option<f64> {
+    probe_ram()
+}
+
+/// `(index, total GB)` for every card nvidia-smi lists, if it is installed.
+pub fn probe_gpus() -> Option<Vec<(u32, f64)>> {
+    probe_nvidia()
+}
+
 fn probe_ram() -> Option<f64> {
     if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
         if let Ok(gb) = parse_meminfo(&text) {
