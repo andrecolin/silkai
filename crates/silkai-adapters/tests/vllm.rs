@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use silkai_adapters::{ChatMessage, Engine, EngineError, VllmEngine};
+use silkai_adapters::{ChatMessage, Engine, EngineError, RunOptions, VllmEngine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -40,7 +40,12 @@ async fn vllm_run_streams_sse_content() {
     let e = VllmEngine::new("write", 28.0, &url);
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
     let mut rx = e
-        .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
+        .run(
+            &[ChatMessage::user("hello")],
+            "",
+            &RunOptions::default(),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     let mut got = Vec::new();
@@ -61,7 +66,14 @@ async fn vllm_forwards_every_message_and_prefix() {
         ChatMessage::system("You are terse."),
         ChatMessage::user("hello"),
     ];
-    let mut rx = e.run(&chat, "hel", CancellationToken::new()).await.unwrap();
+    let opts = RunOptions {
+        max_tokens: Some(64),
+        temperature: Some(0.2),
+    };
+    let mut rx = e
+        .run(&chat, "hel", &opts, CancellationToken::new())
+        .await
+        .unwrap();
     while rx.recv().await.is_some() {}
     let body = log
         .lock()
@@ -84,6 +96,8 @@ async fn vllm_forwards_every_message_and_prefix() {
     assert_eq!(messages[1]["role"], "user");
     assert_eq!(messages[2]["role"], "assistant");
     assert_eq!(messages[2]["content"], "hel");
+    assert_eq!(json["max_tokens"], 64);
+    assert!((json["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-6);
 }
 
 #[tokio::test]
@@ -91,7 +105,12 @@ async fn vllm_run_without_load_is_not_loaded() {
     let (url, _) = spawn_mock().await;
     let e = VllmEngine::new("write", 28.0, &url);
     let err = e
-        .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
+        .run(
+            &[ChatMessage::user("hello")],
+            "",
+            &RunOptions::default(),
+            CancellationToken::new(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotLoaded));
@@ -104,7 +123,12 @@ async fn vllm_run_after_sleep_is_not_loaded() {
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
     e.sleep().await.unwrap();
     let err = e
-        .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
+        .run(
+            &[ChatMessage::user("hello")],
+            "",
+            &RunOptions::default(),
+            CancellationToken::new(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotLoaded));
@@ -118,7 +142,12 @@ async fn vllm_run_stops_on_cancel() {
     let cancel = CancellationToken::new();
     cancel.cancel();
     let mut rx = e
-        .run(&[ChatMessage::user("hello")], "", cancel)
+        .run(
+            &[ChatMessage::user("hello")],
+            "",
+            &RunOptions::default(),
+            cancel,
+        )
         .await
         .unwrap();
     assert!(rx.recv().await.is_none());

@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use silkai_adapters::{ChatMessage, Engine, ProcessEngine};
+use silkai_adapters::{ChatMessage, Engine, ProcessEngine, RunOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -26,7 +26,12 @@ async fn process_run_streams_after_spawn() {
     let e = ProcessEngine::new("write", 28.0, &url, sleep_cmd());
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
     let mut rx = e
-        .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
+        .run(
+            &[ChatMessage::user("hello")],
+            "",
+            &RunOptions::default(),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     let mut got = Vec::new();

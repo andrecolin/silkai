@@ -4,13 +4,16 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::{ChatMessage, Engine, EngineError};
+use crate::{ChatMessage, Engine, EngineError, RunOptions};
 
 #[cfg(feature = "llama")]
 mod cpp;
 
 #[cfg(not(feature = "llama"))]
 const NO_FEATURE: &str = "built without feature llama";
+
+/// Context window when the config does not set `ctx_size`.
+pub const DEFAULT_CTX_SIZE: u32 = 4096;
 
 pub struct LlamaEngine {
     vram_gb: f64,
@@ -20,17 +23,21 @@ pub struct LlamaEngine {
 pub(crate) struct Inner {
     pub on_bench: bool,
     pub path: Option<String>,
+    /// Tokens of context per request; prompt plus answer must fit.
+    #[cfg_attr(not(feature = "llama"), allow(dead_code))]
+    pub ctx_size: u32,
     #[cfg(feature = "llama")]
     pub model: Option<llama_cpp_2::model::LlamaModel>,
 }
 
 impl LlamaEngine {
-    pub fn new(_name: &str, vram_gb: f64) -> Self {
+    pub fn new(_name: &str, vram_gb: f64, ctx_size: Option<u32>) -> Self {
         Self {
             vram_gb,
             inner: Arc::new(Mutex::new(Inner {
                 on_bench: false,
                 path: None,
+                ctx_size: ctx_size.unwrap_or(DEFAULT_CTX_SIZE),
                 #[cfg(feature = "llama")]
                 model: None,
             })),
@@ -80,9 +87,10 @@ impl Engine for LlamaEngine {
         &self,
         messages: &[ChatMessage],
         prefix: &str,
+        opts: &RunOptions,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError> {
-        start_run(self, messages, prefix, cancel)
+        start_run(self, messages, prefix, opts, cancel)
     }
 
     fn measured_vram_gb(&self) -> f64 {
@@ -127,12 +135,14 @@ fn start_run(
     engine: &LlamaEngine,
     messages: &[ChatMessage],
     prefix: &str,
+    opts: &RunOptions,
     cancel: CancellationToken,
 ) -> Result<mpsc::Receiver<String>, EngineError> {
     cpp::start_run(
         Arc::clone(&engine.inner),
         messages.to_vec(),
         prefix.to_string(),
+        opts.clone(),
         cancel,
     )
 }
@@ -142,9 +152,10 @@ fn start_run(
     engine: &LlamaEngine,
     messages: &[ChatMessage],
     prefix: &str,
+    opts: &RunOptions,
     cancel: CancellationToken,
 ) -> Result<mpsc::Receiver<String>, EngineError> {
-    let _ = (engine, messages, prefix, cancel);
+    let _ = (engine, messages, prefix, opts, cancel);
     refuse_without_feature()
 }
 
@@ -160,7 +171,7 @@ mod llama_feature_tests {
 
     #[tokio::test]
     async fn llama_rejects_missing_file() {
-        let e = LlamaEngine::new("soap", 1.0);
+        let e = LlamaEngine::new("soap", 1.0, None);
         let err = e.load("/no/such/model.gguf", 0).await.unwrap_err();
         assert!(matches!(err, EngineError::Other(_)));
     }
@@ -174,7 +185,7 @@ mod llama_stub_tests {
 
     #[tokio::test]
     async fn load_fails_without_feature() {
-        let e = LlamaEngine::new("soap", 1.0);
+        let e = LlamaEngine::new("soap", 1.0, None);
         let err = e.load("/no/such/model.gguf", 1).await.unwrap_err();
         match err {
             EngineError::Other(msg) => assert!(msg.contains("llama")),
@@ -184,9 +195,14 @@ mod llama_stub_tests {
 
     #[tokio::test]
     async fn run_fails_without_feature() {
-        let e = LlamaEngine::new("soap", 1.0);
+        let e = LlamaEngine::new("soap", 1.0, None);
         let err = e
-            .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
+            .run(
+                &[ChatMessage::user("hello")],
+                "",
+                &RunOptions::default(),
+                CancellationToken::new(),
+            )
             .await
             .unwrap_err();
         match err {

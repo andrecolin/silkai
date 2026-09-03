@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::vllm::with_prefix;
-use crate::{ChatMessage, Engine, EngineError};
+use crate::{ChatMessage, Engine, EngineError, RunOptions};
 
 struct Inner {
     on_bench: bool,
@@ -117,6 +117,7 @@ impl Engine for OllamaEngine {
         &self,
         messages: &[ChatMessage],
         prefix: &str,
+        opts: &RunOptions,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError> {
         if !self.on_bench() {
@@ -130,8 +131,9 @@ impl Engine for OllamaEngine {
         let client = self.client.clone();
         let url = format!("{}/api/chat", self.url);
         let messages = with_prefix(messages, prefix);
+        let opts = opts.clone();
         tokio::spawn(async move {
-            stream_chat(client, url, model, messages, tx, cancel).await;
+            stream_chat(client, url, model, messages, opts, tx, cancel).await;
         });
         Ok(rx)
     }
@@ -146,15 +148,22 @@ async fn stream_chat(
     url: String,
     model: String,
     messages: Vec<ChatMessage>,
+    opts: RunOptions,
     tx: mpsc::Sender<String>,
     cancel: CancellationToken,
 ) {
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
         "stream": true,
         "keep_alive": -1,
     });
+    if let Some(m) = opts.max_tokens {
+        body["options"]["num_predict"] = serde_json::json!(m);
+    }
+    if let Some(t) = opts.temperature {
+        body["options"]["temperature"] = serde_json::json!(t);
+    }
     let send = client.post(url).json(&body).send();
     let resp = tokio::select! {
         _ = cancel.cancelled() => return,

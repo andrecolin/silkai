@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::{last_content, ChatMessage, Engine, EngineError};
+use crate::{last_content, ChatMessage, Engine, EngineError, RunOptions};
 
 fn fail_next() -> &'static Mutex<HashMap<String, FailNext>> {
     static MAP: OnceLock<Mutex<HashMap<String, FailNext>>> = OnceLock::new();
@@ -17,6 +17,7 @@ fn fail_next() -> &'static Mutex<HashMap<String, FailNext>> {
 struct FailNext {
     load: u32,
     run: u32,
+    reject_run: u32,
     /// Hold the next load until this is notified, so tests can observe the
     /// runtime while a load is in flight.
     hold_load: Option<Arc<tokio::sync::Notify>>,
@@ -97,6 +98,17 @@ impl FakeEngine {
             .and_then(|f| f.hold_load.take())
     }
 
+    /// Make the next `run` of `name` refuse the request (as a too-long
+    /// prompt would) without faulting the engine.
+    pub fn reject_next_run(name: &str) {
+        fail_next()
+            .lock()
+            .expect("fail-next mutex")
+            .entry(name.to_string())
+            .or_default()
+            .reject_run += 1;
+    }
+
     pub fn fail_next_run(name: &str) {
         fail_next()
             .lock()
@@ -171,10 +183,14 @@ impl Engine for FakeEngine {
         &self,
         messages: &[ChatMessage],
         prefix: &str,
+        _opts: &RunOptions,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError> {
         if take_fail(&self.name, |f| &mut f.run) {
             return Err(EngineError::Other("run failed".into()));
+        }
+        if take_fail(&self.name, |f| &mut f.reject_run) {
+            return Err(EngineError::Rejected("prompt too long for the fake".into()));
         }
         if self.tier() != Tier::Bench {
             return Err(EngineError::NotLoaded);
@@ -268,7 +284,12 @@ mod tests {
         e.load("/x", 0).await.unwrap();
         let cancel = CancellationToken::new();
         let mut rx = e
-            .run(&[ChatMessage::user("hello")], "", cancel)
+            .run(
+                &[ChatMessage::user("hello")],
+                "",
+                &RunOptions::default(),
+                cancel,
+            )
             .await
             .unwrap();
         let mut got = Vec::new();
@@ -285,7 +306,12 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let mut rx = e
-            .run(&[ChatMessage::user("hello")], "", cancel)
+            .run(
+                &[ChatMessage::user("hello")],
+                "",
+                &RunOptions::default(),
+                cancel,
+            )
             .await
             .unwrap();
         assert!(rx.recv().await.is_none());
@@ -299,6 +325,7 @@ mod tests {
             .run(
                 &[ChatMessage::user("hello")],
                 "hello",
+                &RunOptions::default(),
                 CancellationToken::new(),
             )
             .await

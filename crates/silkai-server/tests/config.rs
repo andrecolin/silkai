@@ -34,6 +34,7 @@ exclusive = true
 slots = 1
 keep_warm = true
 transport = "http"
+ctx_size = 8192
 
 [models.too-big]
 engine = "fake"
@@ -58,6 +59,13 @@ fn parses_clinic_and_disables_too_big() {
     assert_eq!(soap.spec.priority, Priority::Normal);
     assert!(soap.spec.exclusive);
     assert_eq!(soap.engine, "llama.cpp");
+    assert_eq!(soap.ctx_size, Some(8192));
+    let whisper = cfg
+        .enabled
+        .iter()
+        .find(|m| m.spec.name == "whisper")
+        .unwrap();
+    assert_eq!(whisper.ctx_size, None);
     assert!(cfg.disabled.iter().any(|m| m.spec.name == "too-big"));
 }
 

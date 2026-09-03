@@ -17,11 +17,19 @@ async fn run_two_ggufs() {
         .await
         .expect("runtime");
     let (job_a, mut rx_a) = rt
-        .submit_chat("a", vec![silkai_adapters::ChatMessage::user("hi")])
+        .submit_chat(
+            "a",
+            vec![silkai_adapters::ChatMessage::user("hi")],
+            Default::default(),
+        )
         .await
         .expect("submit a");
     let (job_b, mut rx_b) = rt
-        .submit_chat("b", vec![silkai_adapters::ChatMessage::user("hi")])
+        .submit_chat(
+            "b",
+            vec![silkai_adapters::ChatMessage::user("hi")],
+            Default::default(),
+        )
         .await
         .expect("submit b");
     assert_pack_or_exclusive(&rt.status());
@@ -111,6 +119,7 @@ fn llama_model(
         cmd: Vec::new(),
         transport: "http".into(),
         idle_timeout_secs: None,
+        ctx_size: None,
     }
 }
 

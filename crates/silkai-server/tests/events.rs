@@ -30,7 +30,7 @@ exclusive = true
 async fn a_chat_leaves_wake_start_finish_in_order() {
     let rt = Runtime::new(cfg()).await.unwrap();
     let (job, mut rx) = rt
-        .submit_chat("soap", vec![ChatMessage::user("note")])
+        .submit_chat("soap", vec![ChatMessage::user("note")], Default::default())
         .await
         .unwrap();
     while rx.recv().await.is_some() {}
