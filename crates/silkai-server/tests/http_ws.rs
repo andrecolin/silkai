@@ -58,3 +58,47 @@ async fn any_websocket_model_can_prompt() {
     assert!(body.contains("hello") || body.contains("world"));
     ws.close(None).await.unwrap();
 }
+
+/// A session that pins a model while the app talks to the engine directly
+/// sends no prompts. Pings must hold it open, not close it: Python's
+/// `websockets` sends one every 20 s by default.
+#[tokio::test]
+async fn keepalives_hold_the_session_open() {
+    let base = serve_ws().await;
+    let url = format!("{base}/v1/session?model=whisper");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let queued = ws.next().await.unwrap().unwrap();
+    assert!(queued.to_string().contains("queued"));
+    let live = ws.next().await.unwrap().unwrap();
+    assert!(live.to_string().contains("live"));
+
+    ws.send(Message::Ping(Vec::new().into())).await.unwrap();
+    ws.send(Message::Text(r#"{"type":"ping"}"#.into()))
+        .await
+        .unwrap();
+
+    // The session is still usable: a prompt after the keepalives still runs.
+    ws.send(Message::Text(
+        r#"{"type":"prompt","content":"hello"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    let mut saw_done = false;
+    for _ in 0..40 {
+        let msg = ws.next().await.unwrap().unwrap();
+        if matches!(msg, Message::Pong(_) | Message::Ping(_)) {
+            continue;
+        }
+        let text = msg.to_string();
+        assert!(
+            !text.contains("idle_close"),
+            "keepalive closed the session: {text}"
+        );
+        if text.contains("done") {
+            saw_done = true;
+            break;
+        }
+    }
+    assert!(saw_done, "prompt after keepalives never completed");
+    ws.close(None).await.unwrap();
+}

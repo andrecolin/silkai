@@ -10,6 +10,11 @@ First crates.io release: `silkai`, `silkai-server`, `silkai-adapters`,
 `silkai-sched`.
 
 ### Added
+- A session stays open on a WebSocket ping or `{"type":"ping"}`. Before this,
+  every frame that was not a prompt or a stop closed the session, so a client
+  sending standard keepalives (Python's `websockets` pings every 20 s by
+  default) lost its pin, and a session that only held a model resident could
+  not survive its own idle timeout at all.
 - `engine = "process"` starts and stops any OpenAI-speaking child
   (llama-server, vLLM, and the like) and waits on `GET /health`. A complete
   three-model llama-server setup lives in `examples/llama-server.toml`.
