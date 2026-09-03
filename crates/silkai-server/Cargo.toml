@@ -1,8 +1,14 @@
 [package]
 name = "silkai-server"
+description = "HTTP and WebSocket daemon for SilkAI: OpenAI-style chat on top of the GPU scheduler"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = []
@@ -10,6 +16,8 @@ llama = ["silkai-adapters/llama"]
 cuda = ["llama", "silkai-adapters/cuda"]
 vulkan = ["llama", "silkai-adapters/vulkan"]
 metal = ["llama", "silkai-adapters/metal"]
+# Router builders on a fixed fake machine for tests. Not a supported API.
+test-util = ["silkai-sched/test-util"]
 
 [dependencies]
 anyhow = "1"
@@ -17,8 +25,8 @@ axum = { version = "0.8", features = ["ws"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-silkai-adapters = { path = "../silkai-adapters" }
-silkai-sched = { path = "../silkai-sched" }
+silkai-adapters.workspace = true
+silkai-sched.workspace = true
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -27,6 +35,7 @@ tower = "0.5"
 tracing = "0.1"
 
 [dev-dependencies]
+silkai-server = { path = ".", features = ["test-util"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tempfile = "3"

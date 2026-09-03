@@ -1334,6 +1334,7 @@ name = "silkai-sched"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "silkai-sched",
 ]
 
 [[package]]
@@ -1348,6 +1349,7 @@ dependencies = [
  "serde_json",
  "silkai-adapters",
  "silkai-sched",
+ "silkai-server",
  "tempfile",
  "thiserror",
  "tokio",

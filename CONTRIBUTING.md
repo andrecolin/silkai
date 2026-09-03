@@ -48,6 +48,23 @@ SILKAI_ITEST=1 SILKAI_GGUF_A=/path/tiny.gguf SILKAI_GGUF_B=/path/small.gguf \
 Do not put CUDA types (or any other GPU SDK types) in `silkai-sched`. Model
 execution lives in `silkai-adapters`.
 
+## Releasing to crates.io
+
+The four crates publish as one set, in dependency order: `silkai-sched`,
+`silkai-adapters`, `silkai-server`, `silkai`. Cargo 1.90+ does the ordering:
+
+```bash
+# bump [workspace.package].version, commit, tag vX.Y.Z, then:
+cargo publish --workspace --dry-run    # packages and verifies all four locally
+cargo publish --workspace
+```
+
+Every crate inherits its metadata from `[workspace.package]`, and the
+inter-crate dependencies are declared once under `[workspace.dependencies]`
+with both `path` and `version`, so a single version bump moves everything.
+Test fixtures (`silkai_sched::clinic`, `silkai_server::app::test_app*`) sit
+behind the `test-util` feature and are not part of the published API.
+
 ## Security
 
 Do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).

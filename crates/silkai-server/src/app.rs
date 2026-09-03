@@ -1,7 +1,6 @@
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -12,11 +11,10 @@ use axum::{Json, Router};
 use futures_util::stream::unfold;
 use serde::{Deserialize, Serialize};
 use silkai_adapters::ChatMessage;
-use silkai_sched::clinic::{clinic_models, clinic_resources};
-use silkai_sched::{JobId, ModelSpec, Priority, StatusSnapshot};
+use silkai_sched::{JobId, StatusSnapshot};
 use tokio::sync::mpsc;
 
-use crate::config::{load_from_path, AppConfig, ConfigError, ConfiguredModel};
+use crate::config::{load_from_path, AppConfig, ConfigError};
 use crate::runtime::{Runtime, RuntimeError};
 
 pub(crate) struct AppState {
@@ -38,16 +36,19 @@ pub async fn app_from_config_path(cfg: AppConfig, config_path: Option<PathBuf>) 
     router(config_path, build_runtime(cfg).await)
 }
 
+#[cfg(feature = "test-util")]
 pub async fn test_app() -> Router {
     app_from_config(clinic_cfg()).await
 }
 
+#[cfg(feature = "test-util")]
 pub async fn test_app_with_disabled() -> Router {
     let mut cfg = clinic_cfg();
     cfg.disabled.push(too_big());
     app_from_config(cfg).await
 }
 
+#[cfg(feature = "test-util")]
 pub async fn test_app_ws() -> Router {
     let mut cfg = clinic_cfg();
     for model in &mut cfg.enabled {
@@ -58,16 +59,19 @@ pub async fn test_app_ws() -> Router {
     app_from_config(cfg).await
 }
 
+#[cfg(feature = "test-util")]
 pub async fn test_app_timeout_ms(ms: u64) -> Router {
     let mut cfg = clinic_cfg();
-    cfg.request_timeout = Duration::from_millis(ms);
+    cfg.request_timeout = std::time::Duration::from_millis(ms);
     app_from_config(cfg).await
 }
 
+#[cfg(feature = "test-util")]
 pub async fn test_app_llama_soap() -> Router {
     app_from_config(llama_soap_cfg()).await
 }
 
+#[cfg(feature = "test-util")]
 fn llama_soap_cfg() -> AppConfig {
     let mut cfg = clinic_cfg();
     for model in &mut cfg.enabled {
@@ -380,24 +384,29 @@ impl ModelEntry {
     }
 }
 
+/// The fixed "clinic" machine from the design spec: a 29 GB bench, a 96 GB
+/// shelf, and three fake models. Every router test starts here.
+#[cfg(feature = "test-util")]
 fn clinic_cfg() -> AppConfig {
+    use silkai_sched::clinic::{clinic_models, clinic_resources};
     AppConfig {
         listen: "127.0.0.1:0".into(),
         prefetch_on_start: true,
         request_timeout_secs: 600,
-        request_timeout: Duration::from_secs(600),
+        request_timeout: std::time::Duration::from_secs(600),
         resources: clinic_resources(),
         enabled: clinic_models().into_iter().map(fake_model).collect(),
         disabled: vec![],
     }
 }
 
-fn too_big() -> ConfiguredModel {
-    fake_model(ModelSpec {
+#[cfg(feature = "test-util")]
+fn too_big() -> crate::config::ConfiguredModel {
+    fake_model(silkai_sched::ModelSpec {
         name: "too-big".into(),
         vram_gb: 40.0,
         ram_gb: 40.0,
-        priority: Priority::Normal,
+        priority: silkai_sched::Priority::Normal,
         exclusive: true,
         slots: 1,
         keep_warm: true,
@@ -406,8 +415,9 @@ fn too_big() -> ConfiguredModel {
     })
 }
 
-fn fake_model(spec: ModelSpec) -> ConfiguredModel {
-    ConfiguredModel {
+#[cfg(feature = "test-util")]
+fn fake_model(spec: silkai_sched::ModelSpec) -> crate::config::ConfiguredModel {
+    crate::config::ConfiguredModel {
         engine: "fake".into(),
         path: format!("/models/{}.bin", spec.name),
         url: None,
