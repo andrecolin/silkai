@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SilkAI</title>
+<style>
+:root{color-scheme:light dark;
+  --bg:#f5f7f6;--ink:#17211f;--ink2:#5b6865;--line:#d7dedc;--panel:#fff;--panel2:#eaf0ee;
+  --bench:#0f6e6e;--bench2:#3c8f8a;--bench3:#7fb3ae;--warn:#9a6a10;--bad:#a3382b;--live:#2f7a3d}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#121917;--ink:#e8eeec;--ink2:#a5b1ae;--line:#2a3532;--panel:#1a2320;--panel2:#22302c;
+  --bench:#5cc4bd;--bench2:#3c8f8a;--bench3:#2f6f6a;--warn:#e0b45a;--bad:#ef8a7c;--live:#7fcf8c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:24px 20px 60px}
+header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:20px}
+h1{font-size:1.3rem;margin:0;letter-spacing:.02em}
+h2{font-size:.78rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink2);margin:28px 0 10px}
+.muted{color:var(--ink2);font-size:.85rem}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+.gpu{margin:10px 0 14px}
+.gpu .cap{display:flex;justify-content:space-between;font-size:.85rem;color:var(--ink2);margin-bottom:4px}
+.bar{position:relative;display:flex;height:34px;border:1px solid var(--line);background:var(--panel);overflow:hidden}
+.seg{display:flex;align-items:center;justify-content:center;color:#fff;font-size:.78rem;white-space:nowrap;overflow:hidden;border-right:1px solid rgba(0,0,0,.25)}
+.seg.excl{outline:2px dashed rgba(255,255,255,.6);outline-offset:-4px}
+.seg.free{background:repeating-linear-gradient(45deg,var(--panel),var(--panel) 5px,var(--panel2) 5px,var(--panel2) 10px);color:var(--ink2)}
+.seg.head{background:var(--panel2);color:var(--ink2)}
+.mark{position:absolute;top:0;bottom:0;width:2px;background:var(--warn)}
+.mark::after{content:attr(data-l);position:absolute;top:-1px;left:4px;font-size:.7rem;color:var(--warn);white-space:nowrap}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--ink2);font-weight:600}
+td.n,th.n{text-align:right}
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:.75rem;font-weight:600;letter-spacing:.03em;background:var(--panel2);color:var(--ink2)}
+.pill.bench{background:var(--bench);color:#fff}.pill.loading,.pill.sleeping{background:var(--warn);color:#fff}
+.pill.live{color:var(--live)}.pill.background{color:var(--ink2)}
+#events{font-size:.82rem;max-height:360px;overflow:auto;border:1px solid var(--line);background:var(--panel)}
+#events div{padding:4px 8px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:96px 80px 1fr;gap:10px}
+#events .k{font-weight:600}#events .fault .k{color:var(--bad)}#events .preempt .k{color:var(--warn)}
+.tw{overflow-x:auto}
+#err{color:var(--bad);font-size:.85rem;display:none}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>SilkAI</h1>
+  <span class="muted" id="meta">connecting…</span>
+  <span id="err"></span>
+</header>
+
+<h2>Cards</h2>
+<div id="gpus"></div>
+
+<h2>Models</h2>
+<div class="tw"><table>
+<thead><tr><th>model</th><th>state</th><th>engine</th><th>priority</th><th class="n">budget GB</th><th class="n">measured GB</th><th class="n">slots</th><th class="n">running</th><th class="n">queued</th><th class="n">sessions</th><th>card</th></tr></thead>
+<tbody id="models"></tbody>
+</table></div>
+
+<h2>Events <span class="muted" id="evcount"></span></h2>
+<div id="events" class="mono"></div>
+
+<p class="muted" style="margin-top:20px">Budget is the configured <code>vram_gb</code>; measured is what the driver attributes to the model's process. Everything on this page comes from <span class="mono">/v1/status</span> and <span class="mono">/v1/events</span>; <span class="mono">/metrics</span> has the same numbers for Prometheus.</p>
+</main>
+<script>
+(function(){
+const $=s=>document.querySelector(s);
+const fmt=v=>v==null?'–':(Math.round(v*10)/10).toFixed(1);
+const colors=['var(--bench)','var(--bench2)','var(--bench3)'];
+let events=[], lastSeq=0;
+
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+
+function drawGpus(st){
+  const host=$('#gpus'); host.innerHTML='';
+  if(!st.gpus.length){host.innerHTML='<p class="muted">no cards configured</p>';return;}
+  st.gpus.forEach(g=>{
+    const onCard=st.models.filter(m=>m.gpu===g.id && (m.state==='bench'||m.state==='loading'||m.state==='sleeping'));
+    const total=g.total_gb||(g.schedulable_gb*1.1);
+    const head=Math.max(total-g.schedulable_gb,0);
+    let used=0, segs='';
+    onCard.forEach((m,i)=>{
+      const w=Math.max(m.budget_gb/total*100,2); used+=m.budget_gb;
+      segs+=`<div class="seg ${m.exclusive?'excl':''}" style="width:${w}%;background:${colors[i%colors.length]}" title="${esc(m.name)} ${fmt(m.budget_gb)} GB${m.exclusive?' (exclusive)':''}">${esc(m.name)} ${fmt(m.budget_gb)}${m.state!=='bench'?' · '+m.state:''}</div>`;
+    });
+    const free=Math.max(g.schedulable_gb-used,0);
+    segs+=`<div class="seg free" style="width:${free/total*100}%">${free>2?'free '+fmt(free):''}</div>`;
+    segs+=`<div class="seg head" style="width:${head/total*100}%" title="headroom">${head>2?'headroom':''}</div>`;
+    const mark=g.measured_used_gb!=null?`<div class="mark" data-l="measured ${fmt(g.measured_used_gb)} GB" style="left:${Math.min(g.measured_used_gb/total*100,99.5)}%"></div>`:'';
+    host.insertAdjacentHTML('beforeend',`<div class="gpu"><div class="cap"><span>GPU ${g.id}</span><span class="mono">budget ${fmt(g.used_gb)} / ${fmt(g.schedulable_gb)} GB schedulable · card ${g.total_gb!=null?fmt(g.total_gb)+' GB':'size unknown'}</span></div><div class="bar">${segs}${mark}</div></div>`);
+  });
+}
+
+function drawModels(st){
+  const rows=st.models.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(m=>`<tr>
+    <td><b>${esc(m.name)}</b></td>
+    <td><span class="pill ${m.state}">${m.state}</span></td>
+    <td class="mono">${esc(m.engine)}</td>
+    <td><span class="pill ${m.priority}">${m.priority}</span>${m.exclusive?' <span class="muted">exclusive</span>':''}</td>
+    <td class="n mono">${fmt(m.budget_gb)}</td>
+    <td class="n mono">${fmt(m.measured_gb)}</td>
+    <td class="n mono">${m.slots}</td>
+    <td class="n mono">${m.running}</td>
+    <td class="n mono">${m.queued}</td>
+    <td class="n mono">${m.sessions}</td>
+    <td class="mono">${m.gpu==null?'–':'GPU '+m.gpu}</td></tr>`).join('');
+  $('#models').innerHTML=rows||'<tr><td colspan="11" class="muted">no models</td></tr>';
+}
+
+function drawEvents(){
+  const host=$('#events');
+  host.innerHTML=events.slice(-200).reverse().map(e=>{
+    const bits=[];
+    if(e.gpu!=null)bits.push('gpu '+e.gpu); if(e.job!=null)bits.push('job '+e.job);
+    if(e.ms!=null)bits.push(e.ms+' ms'); if(e.error)bits.push('error: '+e.error);
+    return `<div class="${e.kind}"><span class="muted">${esc(e.t.slice(11,23))}</span><span class="k">${esc(e.kind)}</span><span>${esc(e.model||'')} <span class="muted">${esc(bits.join(' · '))}</span></span></div>`;
+  }).join('');
+  $('#evcount').textContent=events.length?`(${events.length} kept)`:'';
+}
+
+async function poll(){
+  try{
+    const r=await fetch('/v1/status',{cache:'no-store'});
+    if(!r.ok)throw new Error('status '+r.status);
+    const st=await r.json();
+    drawGpus(st); drawModels(st);
+    $('#meta').textContent=`${st.models.length} models · ${st.gpus.length} card${st.gpus.length===1?'':'s'} · ${st.measured?'nvidia-smi sampling':'no driver sample'} · RAM shelf ${fmt(st.ram_used_gb)} GB`;
+    $('#err').style.display='none';
+  }catch(e){$('#err').textContent='cannot reach daemon: '+e.message;$('#err').style.display='inline';}
+}
+
+function follow(){
+  const es=new EventSource('/v1/events?after='+lastSeq);
+  es.onmessage=ev=>{try{const e=JSON.parse(ev.data);if(e.seq)lastSeq=e.seq;events.push(e);if(events.length>500)events.shift();drawEvents();}catch(_){}};
+  es.onerror=()=>{es.close();setTimeout(follow,2000);};
+}
+
+poll(); setInterval(poll,1000); follow();
+})();
+</script>
+</body>
+</html>

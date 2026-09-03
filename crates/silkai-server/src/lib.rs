@@ -1,4 +1,5 @@
 pub mod app;
+pub(crate) mod auth;
 pub mod config;
 pub mod events;
 pub mod metrics;

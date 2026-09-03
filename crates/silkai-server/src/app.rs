@@ -15,7 +15,7 @@ use silkai_adapters::ChatMessage;
 use silkai_sched::JobId;
 use tokio::sync::mpsc;
 
-use crate::config::{load_from_path, AppConfig, ConfigError};
+use crate::config::{load_from_path, AppConfig, ConfigError, UiConfig};
 use crate::events::{self, Draft, EventLog};
 use crate::runtime::{Runtime, RuntimeError};
 
@@ -24,6 +24,8 @@ pub(crate) struct AppState {
     pub(crate) runtime: tokio::sync::RwLock<Arc<Runtime>>,
     /// Shared across reloads so the history survives a config change.
     pub(crate) events: Arc<EventLog>,
+    /// Fixed at startup; changing `[ui]` needs a restart.
+    pub(crate) ui: UiConfig,
 }
 
 pub async fn app_from_config(cfg: AppConfig) -> Router {
@@ -37,7 +39,8 @@ pub async fn app_from_path(path: impl AsRef<Path>) -> Result<Router, ConfigError
 }
 
 pub async fn app_from_config_path(cfg: AppConfig, config_path: Option<PathBuf>) -> Router {
-    router(config_path, build_runtime(cfg).await)
+    let ui = cfg.ui.clone();
+    router(config_path, build_runtime(cfg).await, ui)
 }
 
 #[cfg(feature = "test-util")]
@@ -70,6 +73,17 @@ pub async fn test_app_timeout_ms(ms: u64) -> Router {
     app_from_config(cfg).await
 }
 
+/// The clinic app with the status page on or off and an optional token.
+#[cfg(feature = "test-util")]
+pub async fn test_app_ui(enabled: bool, token: Option<&str>) -> Router {
+    let mut cfg = clinic_cfg();
+    cfg.ui = UiConfig {
+        enabled,
+        token: token.map(str::to_string),
+    };
+    app_from_config(cfg).await
+}
+
 #[cfg(feature = "test-util")]
 pub async fn test_app_llama_soap() -> Router {
     app_from_config(llama_soap_cfg()).await
@@ -90,25 +104,49 @@ async fn build_runtime(cfg: AppConfig) -> Runtime {
     Runtime::new(cfg).await.expect("runtime")
 }
 
-fn router(config_path: Option<PathBuf>, rt: Runtime) -> Router {
-    Router::new()
+fn router(config_path: Option<PathBuf>, rt: Runtime, ui: UiConfig) -> Router {
+    let state = state_for(config_path, rt, ui);
+    let open = Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(list_models))
         .route("/v1/status", get(status))
         .route("/v1/events", get(events_stream))
-        .route("/metrics", get(metrics))
         .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/session", get(crate::ws::session))
+        .route("/v1/session", get(crate::ws::session));
+    let guarded = Router::new()
+        .route("/ui", get(ui_page))
+        .route("/metrics", get(metrics))
         .route("/admin/reload", post(reload))
-        .with_state(state_for(config_path, rt))
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            crate::auth::require_token,
+        ));
+    open.merge(guarded).with_state(state)
 }
 
-fn state_for(config_path: Option<PathBuf>, rt: Runtime) -> Arc<AppState> {
+fn state_for(config_path: Option<PathBuf>, rt: Runtime, ui: UiConfig) -> Arc<AppState> {
     Arc::new(AppState {
         config_path,
         events: rt.events(),
         runtime: tokio::sync::RwLock::new(Arc::new(rt)),
+        ui,
     })
+}
+
+const UI_PAGE: &str = include_str!("../ui/index.html");
+
+async fn ui_page(State(state): State<Arc<AppState>>) -> Response {
+    if !state.ui.enabled {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        UI_PAGE,
+    )
+        .into_response()
 }
 
 async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
