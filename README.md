@@ -6,6 +6,11 @@
 SilkAI is not a new model runner and not a cloud cluster. We only decide who
 is on the GPU, who waits, and who stays warm in RAM.
 
+That makes switching models a matter of one to three seconds instead of
+twenty or more. A parked model keeps its weights in RAM, so bringing it back
+is a copy across the bus, not a cold load off disk. You stop designing around
+the wait.
+
 One machine, one graphics card, plenty of system RAM, and more models than
 the card can hold at once. That is most workstations and small servers.
 Today each program loads its own model and leaves it there, so the next one
@@ -65,8 +70,8 @@ What that adds up to:
 - **One loaded copy, many requests.** Slots let several requests share one
   resident model.
 - **Parked, not unloaded.** An idle model gives up the card, not its place.
-  It comes back from the page cache in a second or two for a small model,
-  a handful of seconds for a large one; not a cold start.
+  It comes back from RAM in one to three seconds, a little longer for a very
+  large one; not a cold start off disk.
 - **Policy in the config.** Clients only send a model name. A script cannot
   take the card from something live.
 
