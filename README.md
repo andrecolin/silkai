@@ -27,7 +27,7 @@ Three models are needed, and they will not all fit on the card together:
 | model | job | needs | policy |
 |---|---|---|---|
 | `whisper` | speech to text while the doctor dictates | a few GB | **live**: never interrupted, two people can share it |
-| `soap` | turns the transcript into a SOAP note | about 85% of the card | **exclusive**: needs the card to itself |
+| `soap` | turns the transcript into a SOAP note | about 80% of the card | **exclusive**: needs the card to itself |
 | `chart` | reads back through the chart for anything missed | a few GB | **background**: runs in leftover space, leaves first |
 
 Here is a visit, as SilkAI sees it:
@@ -136,7 +136,7 @@ url = "http://127.0.0.1:8102"
 cmd = ["llama-server", "--model", "/models/soap-writer.gguf",
        "--alias", "soap", "--host", "127.0.0.1", "--port", "8102",
        "--n-gpu-layers", "999", "--jinja"]
-vram_gb = 27
+vram_gb = 26
 priority = "normal"
 exclusive = true
 
