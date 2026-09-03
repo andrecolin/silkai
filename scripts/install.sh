@@ -29,8 +29,7 @@ install -m 755 "$root/target/release/silkai" "$bin"
 
 mkdir -p "$config_dir"
 if [[ ! -f "$config_dir/config.toml" ]]; then
-  install -m 644 "$root/examples/config.toml" "$config_dir/config.toml"
-  echo "Wrote $config_dir/config.toml"
+  "$bin" init --config "$config_dir/config.toml"
 else
   echo "Kept existing $config_dir/config.toml"
 fi
