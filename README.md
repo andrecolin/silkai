@@ -6,6 +6,11 @@
 SilkAI is not a new model runner and not a cloud cluster. We only decide who
 is on the GPU, who waits, and who stays warm in RAM.
 
+That makes switching models a matter of one to three seconds instead of
+twenty or more. A parked model keeps its weights in RAM, so bringing it back
+is a copy across the bus, not a cold load off disk. You stop designing around
+the wait.
+
 One machine, one graphics card, plenty of system RAM, and more models than
 the card can hold at once. That is most workstations and small servers.
 Today each program loads its own model and leaves it there, so the next one
@@ -19,41 +24,39 @@ in every request.
 
 [MIT](LICENSE) · [Ko-fi](https://ko-fi.com/andrecolin)
 
-## One card, three models
+## One card, two models
 
 A doctor's office. Say the card has 32 GB and the box has 128 GB of RAM.
-Three models are needed, and they will not all fit on the card together:
+Two models are needed, and they do not fit on the card together:
 
 | model | job | needs | policy |
 |---|---|---|---|
-| `whisper` | speech to text while the doctor dictates | a few GB | **live**: never interrupted, two people can share it |
+| `whisper` | speech to text while the doctor dictates | about 10 GB | **live**: never interrupted, two people can share it |
 | `soap` | turns the transcript into a SOAP note | about 80% of the card | **exclusive**: needs the card to itself |
-| `chart` | reads back through the chart for anything missed | a few GB | **background**: runs in leftover space, leaves first |
 
 Here is a visit, as SilkAI sees it:
 
 1. **The doctor starts dictating.** The app opens a session for `whisper`.
    SilkAI puts it on the card and holds it there for as long as the socket
-   is open. `chart` fits beside it, so it is on the card too, working
-   through yesterday's notes in the background.
+   is open.
 2. **Dictation ends; the app asks `soap` for the note.** `soap` needs the
-   card alone. SilkAI moves `chart` off (it leaves first), parks `whisper`,
-   loads `soap`, and streams the note back. A second note request for the
-   same writer waits in line on the one loaded copy; there is no second
-   20-plus GB load.
+   card alone. SilkAI parks `whisper`, loads `soap`, and streams the note
+   back. A second note request waits in line on the one loaded copy; there
+   is no second 26 GB load.
 3. **The next patient walks in.** The app opens a `whisper` session again.
-   `whisper` is live, so it wins: `soap` is parked, `whisper` is back on the
-   card in a second or two, and `chart` returns to the leftover space. If
-   `soap` was still loading when the request came in, that load is
-   abandoned rather than waited for.
+   `whisper` is live, so it wins: `soap` is parked and `whisper` is back on
+   the card in a second or two. If `soap` was still loading when the request
+   came in, that load is abandoned rather than waited for.
 
-![Plenty of RAM keeps three models warm; the card holds only the model that is working, plus a small slice for the desktop](docs/silkai-memory.svg)
+![128 GB of RAM keeps both models warm; the card holds only the one that is working, plus a small slice for the desktop](docs/silkai-memory.svg)
 
 SilkAI carries text, not audio. The app sends speech to the speech engine
 directly; SilkAI's job is to keep that engine on the card while the doctor
 is talking and to move it aside when the writer needs the whole card. The
-same three roles fit a coding setup: an autocomplete model held live while
-you type, a large model for the hard question, an indexer in the gaps.
+same two roles fit a coding setup: an autocomplete model held live while you
+type, and a large model for the hard question. A third model small enough to
+ride along in the leftover space can be added with `priority = "background"`;
+two is enough to show the idea.
 
 What that adds up to:
 
@@ -65,8 +68,8 @@ What that adds up to:
 - **One loaded copy, many requests.** Slots let several requests share one
   resident model.
 - **Parked, not unloaded.** An idle model gives up the card, not its place.
-  It comes back from the page cache in a second or two for a small model,
-  a handful of seconds for a large one; not a cold start.
+  It comes back from RAM in one to three seconds, a little longer for a very
+  large one; not a cold start off disk.
 - **Policy in the config.** Clients only send a model name. A script cannot
   take the card from something live.
 
@@ -89,8 +92,7 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 `silkai init` writes one model. Add a `[models.*]` block per model after
-that; `examples/llama-server.toml` is the three-model setup above with
-real flags.
+that; `examples/llama-server.toml` is the setup above with real flags.
 
 ## Configure
 
@@ -112,23 +114,25 @@ Card and RAM sizes are probed (`nvidia-smi`, `/proc/meminfo`, or
 or when there is nothing to probe; without either, the daemon refuses to
 start. Headroom is what SilkAI promises not to touch.
 
-The three models from the story, each as a `llama-server` child that SilkAI
-starts and stops:
+The two models from the story, each a child process that SilkAI starts and
+stops:
 
 ```toml
+# The speech engine. Any ASR server will do; SilkAI only starts it, waits
+# for GET /health, and keeps it on the card. Audio goes to it directly.
 [models.whisper]
 engine = "process"
-path = "whisper"                       # the name clients send (the --alias below)
-url = "http://127.0.0.1:8101"          # must match --port
-cmd = ["llama-server", "--model", "/models/whisper.gguf",
-       "--alias", "whisper", "--host", "127.0.0.1", "--port", "8101",
-       "--n-gpu-layers", "999", "--parallel", "2", "--jinja"]
-vram_gb = 3
+path = "whisper"                       # the name clients send
+url = "http://127.0.0.1:8101"          # must match the port below, and serve /health
+cmd = ["env", "WHISPER_MODEL=large-v3",
+       "your-asr-server", "--host", "127.0.0.1", "--port", "8101"]
+vram_gb = 10                           # what the whole service holds on the card
 priority = "live"
 slots = 2
 transport = "both"                     # HTTP and a session socket
-idle_timeout_secs = 60
+idle_timeout_secs = 900
 
+# The note writer, under llama-server.
 [models.soap]
 engine = "process"
 path = "soap"
@@ -139,16 +143,6 @@ cmd = ["llama-server", "--model", "/models/soap-writer.gguf",
 vram_gb = 26
 priority = "normal"
 exclusive = true
-
-[models.chart]
-engine = "process"
-path = "chart"
-url = "http://127.0.0.1:8103"
-cmd = ["llama-server", "--model", "/models/chart-reader.gguf",
-       "--alias", "chart", "--host", "127.0.0.1", "--port", "8103",
-       "--n-gpu-layers", "999", "--jinja"]
-vram_gb = 5
-priority = "background"
 ```
 
 | field | meaning |
@@ -165,6 +159,13 @@ priority = "background"
 
 A model larger than any card's schedulable memory is listed but disabled;
 `silkai check` says so.
+
+There is no `env` key: put `env VAR=value` at the front of `cmd` when a child
+needs a variable. `vram_gb` is what the *process* holds, not what the weights
+weigh. A Python service can hold far more than its model: faster-whisper on
+CTranslate2 with torch loaded for VAD has two CUDA contexts in one process,
+and `GET /v1/status` reports what the driver measures beside the budget you
+set, so you can correct it.
 
 ## Engines
 

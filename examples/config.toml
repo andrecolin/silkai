@@ -30,11 +30,13 @@ request_timeout_secs = 600
 # One model on both cards (layer/tensor split): gpus = [0, 1]
 
 # Live speech-to-text (whisper): two people can share this copy.
+# A large medical ASR model: bigger than the tiny ones, and worth it for
+# clinical vocabulary. It stays live so dictation is never interrupted.
 [models.whisper]
 engine = "fake"
 # engine = "llama.cpp"
-path = "/models/whisper.bin"
-vram_gb = 3
+path = "/models/whisper-large-medical.bin"
+vram_gb = 10
 priority = "live"
 exclusive = false
 slots = 2
@@ -60,18 +62,6 @@ path = "/models/soap-q4.gguf"
 vram_gb = 26
 priority = "normal"
 exclusive = true
-slots = 1
-keep_warm = true
-transport = "http"
-
-# Chart reader: runs in leftover space only.
-[models.chart]
-engine = "fake"
-# engine = "llama.cpp"
-path = "/models/chart-q4.gguf"
-vram_gb = 5
-priority = "background"
-exclusive = false
 slots = 1
 keep_warm = true
 transport = "http"
