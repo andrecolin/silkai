@@ -65,15 +65,3 @@ exclusive = true
 slots = 1
 keep_warm = true
 transport = "http"
-
-# Chart reader: runs in leftover space only.
-[models.chart]
-engine = "fake"
-# engine = "llama.cpp"
-path = "/models/chart-q4.gguf"
-vram_gb = 5
-priority = "background"
-exclusive = false
-slots = 1
-keep_warm = true
-transport = "http"
