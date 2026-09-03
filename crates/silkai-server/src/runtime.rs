@@ -174,6 +174,7 @@ impl Runtime {
             SubmitResult::Rejected { reason } => return Err(reject_err(reason)),
         };
         self.sessions().insert(job_id, model.to_string());
+        self.record_status(&sched);
         drop(sched);
         self.emit(Draft::new("session_open").model(model).job(job_id.0));
         if let Err(err) = self.apply_all(actions).await {
@@ -370,6 +371,9 @@ impl Runtime {
             SubmitResult::Rejected { reason } => return Err(reject_err(reason)),
         };
         self.store_waiter(job_id, model, messages, tx).await;
+        // The scheduler has already moved models in its own books; publish
+        // that now so status is truthful while the engines catch up.
+        self.record_status(&sched);
         if let Err(err) = self.apply_all(actions).await {
             self.isolate(&mut sched, job_id, Some(model), &err).await;
             return Err(err);
@@ -406,6 +410,7 @@ impl Runtime {
             return Ok(());
         }
         let sched = self.inner.scheduler.lock().await;
+        self.record_status(&sched);
         let result = self.apply_all(actions).await;
         self.record_status(&sched);
         result
@@ -516,6 +521,14 @@ impl Runtime {
     }
 
     async fn apply_all(&self, actions: Vec<Action>) -> Result<(), RuntimeError> {
+        // A model booked for the card is "loading" from the moment the batch
+        // is decided, not only once its own engine call begins (it may be
+        // waiting for another model to leave first).
+        for action in &actions {
+            if let Action::Load { model, .. } | Action::Wake { model, .. } = action {
+                self.set_overlay(model, "loading");
+            }
+        }
         for action in actions {
             self.apply(action).await?;
         }
