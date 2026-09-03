@@ -16,8 +16,35 @@ pub async fn serve_listener(
     cfg: AppConfig,
     config_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    axum::serve(listener, app_from_config_path(cfg, config_path).await).await?;
+    axum::serve(listener, app_from_config_path(cfg, config_path).await)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+/// Resolve on Ctrl-C or SIGTERM so `serve` returns and drops the runtime.
+/// Dropping the runtime kills the process-engine children; without this a
+/// `systemctl stop` or a plain `kill` left them holding VRAM.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    tracing::info!("shutting down");
 }
 
 fn local_listen_addr(listen: &str) -> anyhow::Result<SocketAddr> {

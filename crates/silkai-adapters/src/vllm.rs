@@ -38,6 +38,15 @@ impl VllmEngine {
         self.lock().gpu
     }
 
+    /// Record that the model is on `gpu` without talking to the server.
+    /// The process engine uses this after it has spawned and health-checked
+    /// a child that starts awake.
+    pub(crate) fn mark_on_bench(&self, gpu: u32) {
+        let mut inner = self.lock();
+        inner.gpu = Some(gpu);
+        inner.on_bench = true;
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().expect("vllm engine mutex")
     }

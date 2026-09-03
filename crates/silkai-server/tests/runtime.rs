@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Router;
 use silkai_adapters::FakeEngine;
 use silkai_sched::clinic::{clinic_models, clinic_resources};
@@ -402,6 +402,7 @@ async fn spawn_vllm_mock() -> String {
     let app = Router::new()
         .route("/sleep", post(vllm_ok))
         .route("/wake_up", post(vllm_ok))
+        .route("/health", get(vllm_ok))
         .route("/v1/chat/completions", post(vllm_chat_sse));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

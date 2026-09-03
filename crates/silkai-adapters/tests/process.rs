@@ -51,7 +51,7 @@ async fn process_empty_cmd_fails_and_is_not_alive() {
 }
 
 #[tokio::test]
-async fn process_wake_up_error_kills_child() {
+async fn process_health_error_kills_child() {
     let (url, _) = spawn_mock(true).await;
     let e = ProcessEngine::new("write", 28.0, &url, sleep_cmd());
     assert!(e.load("Qwen/Qwen3-0.6B", 0).await.is_err());
@@ -88,6 +88,30 @@ async fn process_load_waits_until_http_ready() {
     e.sleep().await.unwrap();
 }
 
+/// llama-server answers `/health` 503 until the GGUF is on the card.
+#[tokio::test]
+async fn process_load_waits_through_503() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = hits.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = read_request(&mut sock).await;
+            let resp = if n < 2 { LOADING_503 } else { OK_EMPTY };
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
+    });
+    let e = ProcessEngine::new("write", 28.0, &url, sleep_cmd());
+    e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
+    assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+    e.sleep().await.unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn process_sleep_kills_process_group() {
@@ -118,15 +142,15 @@ async fn process_sleep_kills_process_group() {
     }
 }
 
-async fn spawn_mock(fail_wake: bool) -> (String, Arc<Mutex<Vec<String>>>) {
+async fn spawn_mock(fail_health: bool) -> (String, Arc<Mutex<Vec<String>>>) {
     let log = Arc::new(Mutex::new(Vec::new()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    serve_mock(listener, fail_wake, log.clone());
+    serve_mock(listener, fail_health, log.clone());
     (format!("http://{addr}"), log)
 }
 
-fn serve_mock(listener: TcpListener, fail_wake: bool, log: Arc<Mutex<Vec<String>>>) {
+fn serve_mock(listener: TcpListener, fail_health: bool, log: Arc<Mutex<Vec<String>>>) {
     tokio::spawn(async move {
         loop {
             let Ok((mut sock, _)) = listener.accept().await else {
@@ -134,7 +158,7 @@ fn serve_mock(listener: TcpListener, fail_wake: bool, log: Arc<Mutex<Vec<String>
             };
             let state = log.clone();
             tokio::spawn(async move {
-                handle_conn(&mut sock, &state, fail_wake).await;
+                handle_conn(&mut sock, &state, fail_health).await;
             });
         }
     });
@@ -213,7 +237,11 @@ fn pid_exists(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-async fn handle_conn(sock: &mut tokio::net::TcpStream, log: &Mutex<Vec<String>>, fail_wake: bool) {
+async fn handle_conn(
+    sock: &mut tokio::net::TcpStream,
+    log: &Mutex<Vec<String>>,
+    fail_health: bool,
+) {
     let Some((method, path, body)) = read_request(sock).await else {
         return;
     };
@@ -225,8 +253,8 @@ async fn handle_conn(sock: &mut tokio::net::TcpStream, log: &Mutex<Vec<String>>,
         }
         log.lock().expect("log").push(line);
     }
-    let resp = if fail_wake && path.starts_with("/wake_up") {
-        FAIL_WAKE
+    let resp = if fail_health && path.starts_with("/health") {
+        FAIL_HEALTH
     } else if path.starts_with("/v1/chat/completions") {
         CHAT_SSE
     } else {
@@ -283,7 +311,10 @@ fn find_headers_end(buf: &[u8]) -> Option<usize> {
 
 const OK_EMPTY: &str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
-const FAIL_WAKE: &str =
+const LOADING_503: &str =
+    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+const FAIL_HEALTH: &str =
     "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 const CHAT_SSE: &str = concat!(
