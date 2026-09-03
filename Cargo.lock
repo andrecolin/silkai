@@ -1319,6 +1319,7 @@ name = "silkai-adapters"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "libc",
  "llama-cpp-2",
  "reqwest",
  "serde",

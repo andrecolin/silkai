@@ -100,16 +100,19 @@ async fn process_sleep_kills_process_group() {
     );
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
     let pid = e.child_id().expect("child pid");
-    let members = pids_in_group(pid);
+    // `sh` forks `sleep` after load() returns, so wait for the group to fill.
+    let members = await_group(pid, 2).await;
     assert!(
         members.len() >= 2,
         "expected sh and sleep in group, got {members:?}"
     );
     e.sleep().await.unwrap();
     assert!(!e.alive());
+    // SIGKILL to the group is not synchronous: `sleep` is a grandchild we
+    // never wait on, so it is reparented and reaped by init a moment later.
     for member in members {
         assert!(
-            !pid_exists(member),
+            await_gone(member).await,
             "process {member} still running after sleep"
         );
     }
@@ -138,6 +141,19 @@ fn serve_mock(listener: TcpListener, fail_wake: bool, log: Arc<Mutex<Vec<String>
 }
 
 #[cfg(unix)]
+async fn await_group(pgid: u32, want: usize) -> Vec<u32> {
+    let mut members = pids_in_group(pgid);
+    for _ in 0..100 {
+        if members.len() >= want {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        members = pids_in_group(pgid);
+    }
+    members
+}
+
+#[cfg(unix)]
 fn pids_in_group(pgid: u32) -> Vec<u32> {
     let out = std::process::Command::new("ps")
         .args(["-axo", "pid=,pgid="])
@@ -152,6 +168,37 @@ fn pids_in_group(pgid: u32) -> Vec<u32> {
             (group == pgid).then_some(pid)
         })
         .collect()
+}
+
+#[cfg(unix)]
+async fn await_gone(pid: u32) -> bool {
+    for _ in 0..200 {
+        if !pid_alive(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    !pid_alive(pid)
+}
+
+/// A killed process that has not been reaped yet is a zombie, and `kill -0`
+/// still succeeds on it. Treat that as gone.
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    if !pid_exists(pid) {
+        return false;
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output();
+    match out {
+        Ok(o) => {
+            let stat = String::from_utf8_lossy(&o.stdout);
+            let stat = stat.trim();
+            !stat.is_empty() && !stat.starts_with('Z')
+        }
+        Err(_) => false,
+    }
 }
 
 #[cfg(unix)]

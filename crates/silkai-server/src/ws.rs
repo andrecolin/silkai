@@ -132,8 +132,12 @@ async fn send_json(
     text: Option<&str>,
     message: Option<&str>,
 ) -> Result<(), RuntimeError> {
-    let payload = serde_json::to_string(&ServerMsg { kind, text, message })
-        .map_err(|e| RuntimeError::Engine(silkai_adapters::EngineError::Other(e.to_string())))?;
+    let payload = serde_json::to_string(&ServerMsg {
+        kind,
+        text,
+        message,
+    })
+    .map_err(|e| RuntimeError::Engine(silkai_adapters::EngineError::Other(e.to_string())))?;
     socket
         .send(Message::Text(payload.into()))
         .await
