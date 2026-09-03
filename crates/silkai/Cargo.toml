@@ -3,6 +3,7 @@ name = "silkai"
 description = "Local GPU scheduler daemon: run several LLMs on one card, pack what fits, park the rest warm in RAM"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

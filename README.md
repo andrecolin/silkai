@@ -76,7 +76,7 @@ What that adds up to:
 
 ## Quickstart
 
-Needs Rust 1.80+ ([rustup](https://rustup.rs)) and a
+Needs Rust 1.88+ ([rustup](https://rustup.rs)) and a
 [llama.cpp](https://github.com/ggml-org/llama.cpp) build with `llama-server`
 on your `PATH`. SilkAI starts and stops it for you; the default build has no
 CUDA in it and does not need any. (An optional in-process engine can be built
