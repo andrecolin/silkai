@@ -5,7 +5,7 @@
 # `llama-server`. No `--features` needed on SilkAI itself. Copy to
 # ~/.config/silkai/config.toml and edit the paths.
 #
-# Tested on a 32 GB card: the 1.5B and 4B models share the GPU; the 27B
+# Tested on a 32 GB card: the speech and chart models share the GPU; the 27B
 # writer needs it alone, so SilkAI kills the small children, starts the big
 # one, and brings the small ones back afterwards.
 
@@ -30,11 +30,11 @@ engine = "process"
 path = "whisper"                       # the --alias below
 url = "http://127.0.0.1:8101"             # must match --port
 cmd = ["llama-server",
-       "--model", "/models/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+       "--model", "/models/whisper-large-medical.gguf",
        "--alias", "whisper", "--host", "127.0.0.1", "--port", "8101",
        "--ctx-size", "8192", "--parallel", "2", "--n-gpu-layers", "999",
        "--jinja", "--no-webui"]
-vram_gb = 3
+vram_gb = 12
 priority = "live"
 slots = 2                                  # matches --parallel
 transport = "both"
