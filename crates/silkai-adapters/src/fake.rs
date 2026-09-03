@@ -47,6 +47,8 @@ struct Inner {
     log: Vec<String>,
     tier: Tier,
     gpu: Option<u32>,
+    /// A load or wake currently parked on `hold_next_load`.
+    holding: Option<Arc<tokio::sync::Notify>>,
 }
 
 pub struct FakeEngine {
@@ -64,6 +66,7 @@ impl FakeEngine {
                 log: Vec::new(),
                 tier: Tier::Cupboard,
                 gpu: None,
+                holding: None,
             }),
         }
     }
@@ -136,6 +139,23 @@ impl FakeEngine {
         inner.tier = tier;
     }
 
+    /// Park until the test releases the gate, or until `sleep`/`discard`
+    /// interrupts the load the way killing a child would.
+    async fn hold_if_asked(&self) {
+        let Some(gate) = Self::take_hold(&self.name) else {
+            return;
+        };
+        self.lock().holding = Some(Arc::clone(&gate));
+        gate.notified().await;
+        self.lock().holding = None;
+    }
+
+    fn release_held(&self) {
+        if let Some(gate) = self.lock().holding.take() {
+            gate.notify_one();
+        }
+    }
+
     fn tier(&self) -> Tier {
         self.lock().tier
     }
@@ -152,29 +172,27 @@ impl Engine for FakeEngine {
         if take_fail(&self.name, |f| &mut f.load) {
             return Err(EngineError::Other("load failed".into()));
         }
-        if let Some(gate) = Self::take_hold(&self.name) {
-            gate.notified().await;
-        }
+        self.hold_if_asked().await;
         self.lock().gpu = Some(gpu);
         self.record("load", Tier::Bench);
         Ok(())
     }
 
     async fn wake(&self, gpu: u32) -> Result<(), EngineError> {
-        if let Some(gate) = Self::take_hold(&self.name) {
-            gate.notified().await;
-        }
+        self.hold_if_asked().await;
         self.lock().gpu = Some(gpu);
         self.record("wake", Tier::Bench);
         Ok(())
     }
 
     async fn sleep(&self) -> Result<(), EngineError> {
+        self.release_held();
         self.record("sleep", Tier::Shelf);
         Ok(())
     }
 
     async fn discard(&self) -> Result<(), EngineError> {
+        self.release_held();
         self.record("discard", Tier::Cupboard);
         Ok(())
     }

@@ -31,6 +31,10 @@ pub enum RuntimeError {
     Unavailable,
     #[error("websocket not enabled for model")]
     NoWebsocket,
+    /// A load was abandoned because a higher-priority job took the card.
+    /// The job is back in the queue; nothing is wrong.
+    #[error("load interrupted")]
+    Interrupted,
     #[error(transparent)]
     Engine(#[from] EngineError),
 }
@@ -56,6 +60,9 @@ struct Inner {
     apply_rx: Mutex<Option<mpsc::UnboundedReceiver<Vec<Action>>>>,
     /// Why a job ended without tokens; read once by the HTTP handler.
     rejections: StdMutex<HashMap<JobId, String>>,
+    /// One token per load or wake in flight, keyed by model. A preempt of
+    /// the job that wanted the model fires it.
+    loads: StdMutex<HashMap<String, CancellationToken>>,
     request_timeout: Duration,
     transports: HashMap<String, String>,
     idle_timeouts: HashMap<String, Duration>,
@@ -84,6 +91,7 @@ impl Inner {
             apply_tx,
             apply_rx: Mutex::new(Some(apply_rx)),
             rejections: StdMutex::new(HashMap::new()),
+            loads: StdMutex::new(HashMap::new()),
             request_timeout: cfg.request_timeout,
             transports: transports_for(&cfg.enabled),
             idle_timeouts: idle_timeouts_for(&cfg.enabled),
@@ -191,11 +199,14 @@ impl Runtime {
         self.record_status(&sched);
         drop(sched);
         self.emit(Draft::new("session_open").model(model).job(job_id.0));
-        if let Err(err) = self.apply_all(actions).await {
-            self.sessions().remove(&job_id);
-            let mut sched = self.inner.scheduler.lock().await;
-            self.isolate(&mut sched, job_id, Some(model), &err).await;
-            return Err(err);
+        match self.apply_all(actions).await {
+            Ok(()) | Err(RuntimeError::Interrupted) => {}
+            Err(err) => {
+                self.sessions().remove(&job_id);
+                let mut sched = self.inner.scheduler.lock().await;
+                self.isolate(&mut sched, job_id, Some(model), &err).await;
+                return Err(err);
+            }
         }
         let sched = self.inner.scheduler.lock().await;
         self.record_status(&sched);
@@ -384,19 +395,32 @@ impl Runtime {
         opts: RunOptions,
         tx: mpsc::Sender<String>,
     ) -> Result<JobId, RuntimeError> {
-        let mut sched = self.inner.scheduler.lock().await;
-        let (job_id, actions) = match sched.submit(model) {
-            SubmitResult::Accepted { job_id, actions } => (job_id, actions),
-            SubmitResult::Rejected { reason } => return Err(reject_err(reason)),
+        let (job_id, actions) = {
+            let mut sched = self.inner.scheduler.lock().await;
+            let (job_id, actions) = match sched.submit(model) {
+                SubmitResult::Accepted { job_id, actions } => (job_id, actions),
+                SubmitResult::Rejected { reason } => return Err(reject_err(reason)),
+            };
+            self.store_waiter(job_id, model, messages, opts, tx).await;
+            // The scheduler has already moved models in its own books;
+            // publish that now so status is truthful while the engines
+            // catch up.
+            self.record_status(&sched);
+            (job_id, actions)
         };
-        self.store_waiter(job_id, model, messages, opts, tx).await;
-        // The scheduler has already moved models in its own books; publish
-        // that now so status is truthful while the engines catch up.
-        self.record_status(&sched);
-        if let Err(err) = self.apply_all(actions).await {
-            self.isolate(&mut sched, job_id, Some(model), &err).await;
-            return Err(err);
+        // Engines run with the scheduler unlocked, so a live request can
+        // get in while a long load is under way and preempt it.
+        match self.apply_all(actions).await {
+            Ok(()) => {}
+            // The preemptor already re-queued this job; nothing to undo.
+            Err(RuntimeError::Interrupted) => {}
+            Err(err) => {
+                let mut sched = self.inner.scheduler.lock().await;
+                self.isolate(&mut sched, job_id, Some(model), &err).await;
+                return Err(err);
+            }
         }
+        let sched = self.inner.scheduler.lock().await;
         self.record_status(&sched);
         Ok(job_id)
     }
@@ -625,20 +649,67 @@ impl Runtime {
     }
 
     async fn load(&self, model: &str, gpu: u32) -> Result<(), RuntimeError> {
-        let path = self.path(model)?;
-        let engine = self.engine(model)?;
+        let path = self.path(model)?.to_string();
+        let engine = Arc::clone(self.engine(model)?);
+        self.interruptible(model, engine.clone(), async move {
+            engine.load(&path, gpu).await
+        })
+        .await
+    }
+
+    async fn wake(&self, model: &str, gpu: u32) -> Result<(), RuntimeError> {
+        let engine = Arc::clone(self.engine(model)?);
+        self.interruptible(model, engine.clone(), async move { engine.wake(gpu).await })
+            .await
+    }
+
+    /// Run a load or wake that a preempt can abandon. On interruption the
+    /// engine is told to sleep (a child is killed, an HTTP server is put
+    /// to sleep), the original call is allowed to finish so nothing is left
+    /// half-placed, and it is slept once more in case it landed anyway.
+    async fn interruptible(
+        &self,
+        model: &str,
+        engine: Arc<dyn Engine>,
+        call: impl std::future::Future<Output = Result<(), EngineError>>,
+    ) -> Result<(), RuntimeError> {
+        let token = CancellationToken::new();
+        self.inner
+            .loads
+            .lock()
+            .expect("loads mutex")
+            .insert(model.to_string(), token.clone());
         self.set_overlay(model, "loading");
-        let result = engine.load(path, gpu).await.map_err(engine_err);
+        tokio::pin!(call);
+        let result = tokio::select! {
+            r = &mut call => match r {
+                // The call finished, but if the preempt already fired the
+                // model no longer belongs on the card: undo the landing.
+                Ok(()) if token.is_cancelled() => {
+                    let _ = engine.sleep().await;
+                    Err(RuntimeError::Interrupted)
+                }
+                r => r.map_err(engine_err),
+            },
+            _ = token.cancelled() => {
+                let _ = engine.sleep().await;
+                let landed = call.await.is_ok();
+                if landed {
+                    let _ = engine.sleep().await;
+                }
+                Err(RuntimeError::Interrupted)
+            }
+        };
+        self.inner.loads.lock().expect("loads mutex").remove(model);
         self.clear_overlay(model);
         result
     }
 
-    async fn wake(&self, model: &str, gpu: u32) -> Result<(), RuntimeError> {
-        let engine = self.engine(model)?;
-        self.set_overlay(model, "loading");
-        let result = engine.wake(gpu).await.map_err(engine_err);
-        self.clear_overlay(model);
-        result
+    /// Fire the token of a load in flight for `model`, if any.
+    fn interrupt_load(&self, model: &str) {
+        if let Some(token) = self.inner.loads.lock().expect("loads mutex").get(model) {
+            token.cancel();
+        }
     }
 
     async fn sleep(&self, model: &str) -> Result<(), RuntimeError> {
@@ -656,6 +727,11 @@ impl Runtime {
     async fn preempt(&self, job_id: JobId) -> Result<(), RuntimeError> {
         if let Some(token) = self.inner.cancels.lock().await.remove(&job_id) {
             token.cancel();
+        }
+        // The job may not be generating yet: its model could still be on
+        // its way to the card. Abandon that load; the job is re-queued.
+        if let Some(model) = self.waiter_model(job_id).await {
+            self.interrupt_load(&model);
         }
         Ok(())
     }
