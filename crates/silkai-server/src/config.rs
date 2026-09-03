@@ -35,6 +35,9 @@ pub struct ConfiguredModel {
     pub cmd: Vec<String>,
     pub transport: String,
     pub idle_timeout_secs: Option<u64>,
+    /// Context window for the in-process llama.cpp engine. Other engines
+    /// take it from their own command line.
+    pub ctx_size: Option<u32>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -106,6 +109,7 @@ struct FileModel {
     #[serde(default = "default_transport")]
     transport: String,
     idle_timeout_secs: Option<u64>,
+    ctx_size: Option<u32>,
     #[serde(default)]
     gpu: Option<u32>,
     #[serde(default)]
@@ -361,6 +365,7 @@ fn configured_model(name: String, m: FileModel) -> Result<ConfiguredModel, Confi
         cmd: m.cmd,
         transport: m.transport,
         idle_timeout_secs: m.idle_timeout_secs,
+        ctx_size: m.ctx_size,
     })
 }
 

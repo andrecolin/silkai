@@ -18,6 +18,7 @@ fn clinic_cfg() -> AppConfig {
                 cmd: Vec::new(),
                 transport: "http".into(),
                 idle_timeout_secs: None,
+                ctx_size: None,
                 spec,
             })
             .collect(),

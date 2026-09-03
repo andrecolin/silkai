@@ -44,6 +44,14 @@ impl ChatMessage {
     }
 }
 
+/// Per-request generation settings, taken from the OpenAI-style body.
+/// `None` means the engine's own default.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunOptions {
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+}
+
 /// The text a plain completion engine sees: the last message's content.
 /// Used by engines that have no chat template of their own.
 pub fn last_content(messages: &[ChatMessage]) -> &str {
@@ -54,6 +62,10 @@ pub fn last_content(messages: &[ChatMessage]) -> &str {
 pub enum EngineError {
     #[error("not loaded")]
     NotLoaded,
+    /// The request itself is unusable (too long for the context window,
+    /// and so on). The engine is fine; only this job fails.
+    #[error("{0}")]
+    Rejected(String),
     #[error("{0}")]
     Other(String),
 }
@@ -72,6 +84,7 @@ pub trait Engine: Send + Sync {
         &self,
         messages: &[ChatMessage],
         prefix: &str,
+        opts: &RunOptions,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError>;
     fn measured_vram_gb(&self) -> f64;

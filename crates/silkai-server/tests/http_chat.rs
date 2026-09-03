@@ -34,6 +34,7 @@ fn crashy_http_cfg() -> AppConfig {
             cmd: Vec::new(),
             transport: "http".into(),
             idle_timeout_secs: None,
+            ctx_size: None,
             spec: ModelSpec {
                 name: "crashy-http".into(),
                 vram_gb: 8.0,
@@ -229,4 +230,56 @@ async fn timeout_does_not_leave_soap_queued() {
     assert_eq!(soap["queued"], 0);
     assert_eq!(soap["running"], 0);
     let _ = whisper.await;
+}
+
+/// A request the engine cannot take (a prompt beyond its window) is a 400
+/// with the reason, and the model is still resident for the next one.
+#[tokio::test]
+async fn rejected_prompt_is_400_and_model_stays_up() {
+    let app = test_app().await;
+    let warm = app.clone().oneshot(chat("soap", false)).await.unwrap();
+    assert_eq!(warm.status(), StatusCode::OK);
+    let _ = axum::body::to_bytes(warm.into_body(), usize::MAX).await;
+
+    FakeEngine::reject_next_run("soap");
+    let res = app.clone().oneshot(chat("soap", false)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(std::str::from_utf8(&body).unwrap().contains("too long"));
+
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(status.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let soap = v["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "soap")
+        .unwrap();
+    assert_eq!(soap["state"], "bench", "{soap}");
+    assert_eq!(soap["running"], 0);
+
+    let again = app.oneshot(chat("soap", false)).await.unwrap();
+    assert_eq!(again.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn rejected_prompt_streaming_is_400_too() {
+    let app = test_app().await;
+    FakeEngine::reject_next_run("soap");
+    let res = app.oneshot(chat("soap", true)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }

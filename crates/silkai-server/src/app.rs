@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use futures_util::stream::{self, unfold};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use silkai_adapters::ChatMessage;
+use silkai_adapters::{ChatMessage, RunOptions};
 use silkai_sched::JobId;
 use tokio::sync::mpsc;
 
@@ -229,6 +229,19 @@ struct ChatRequest {
     stream: bool,
     #[serde(default)]
     messages: Vec<WireMessage>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    temperature: Option<f32>,
+}
+
+impl ChatRequest {
+    fn options(&self) -> RunOptions {
+        RunOptions {
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+        }
+    }
 }
 
 /// One OpenAI-style message as clients send it. `content` is usually a
@@ -269,9 +282,10 @@ async fn chat_completions(
     Json(req): Json<ChatRequest>,
 ) -> Response {
     let rt = runtime_of(&state).await;
+    let opts = req.options();
     let model = req.model;
     let messages = messages_of(req.messages);
-    match rt.submit_chat(&model, messages).await {
+    match rt.submit_chat(&model, messages, opts).await {
         Ok((job, rx)) => finish_chat(&rt, job, rx, req.stream).await,
         Err(err) => chat_error(err).into_response(),
     }
@@ -325,6 +339,10 @@ async fn finish_chat(
 
 async fn stream_or_timeout(rt: &Runtime, job: JobId, mut rx: mpsc::Receiver<String>) -> Response {
     match tokio::time::timeout(rt.request_timeout(), rx.recv()).await {
+        Ok(None) => match rt.take_rejection(job) {
+            Some(reason) => (StatusCode::BAD_REQUEST, reason).into_response(),
+            None => sse_response(job, None, rx),
+        },
         Ok(first) => sse_response(job, first, rx),
         Err(_) => timeout_drop(rt, job).await,
     }
@@ -332,6 +350,10 @@ async fn stream_or_timeout(rt: &Runtime, job: JobId, mut rx: mpsc::Receiver<Stri
 
 async fn json_or_timeout(rt: &Runtime, job: JobId, rx: mpsc::Receiver<String>) -> Response {
     match tokio::time::timeout(rt.request_timeout(), collect_tokens(rx)).await {
+        Ok(tokens) if tokens.is_empty() => match rt.take_rejection(job) {
+            Some(reason) => (StatusCode::BAD_REQUEST, reason).into_response(),
+            None => json_completion(&tokens),
+        },
         Ok(tokens) => json_completion(&tokens),
         Err(_) => timeout_drop(rt, job).await,
     }
@@ -446,14 +468,17 @@ fn json_completion(tokens: &[String]) -> Response {
     .into_response()
 }
 
-fn chat_error(err: RuntimeError) -> StatusCode {
-    match err {
+/// Status plus the reason as the body, so a client sees why instead of a
+/// bare code.
+fn chat_error(err: RuntimeError) -> (StatusCode, String) {
+    let status = match err {
         RuntimeError::Unknown => StatusCode::NOT_FOUND,
         RuntimeError::Disabled | RuntimeError::TooLarge => StatusCode::BAD_REQUEST,
         RuntimeError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeError::NoWebsocket => StatusCode::NOT_FOUND,
         RuntimeError::Engine(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    }
+    };
+    (status, err.to_string())
 }
 
 #[derive(Serialize)]
@@ -527,6 +552,7 @@ fn fake_model(spec: silkai_sched::ModelSpec) -> crate::config::ConfiguredModel {
         cmd: Vec::new(),
         transport: "http".into(),
         idle_timeout_secs: None,
+        ctx_size: None,
         spec,
     }
 }

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use silkai_adapters::{
     ChatMessage, Engine, EngineError, FakeEngine, LlamaEngine, OllamaEngine, ProcessEngine,
-    VllmEngine,
+    RunOptions, VllmEngine,
 };
 use silkai_sched::{
     Action, JobId, RejectReason, SchedError, Scheduler, StatusSnapshot, SubmitResult,
@@ -38,6 +38,7 @@ pub enum RuntimeError {
 struct Waiter {
     model: String,
     messages: Vec<ChatMessage>,
+    opts: RunOptions,
     emitted: String,
     tx: mpsc::Sender<String>,
 }
@@ -53,6 +54,8 @@ struct Inner {
     cancels: Mutex<HashMap<JobId, CancellationToken>>,
     apply_tx: mpsc::UnboundedSender<Vec<Action>>,
     apply_rx: Mutex<Option<mpsc::UnboundedReceiver<Vec<Action>>>>,
+    /// Why a job ended without tokens; read once by the HTTP handler.
+    rejections: StdMutex<HashMap<JobId, String>>,
     request_timeout: Duration,
     transports: HashMap<String, String>,
     idle_timeouts: HashMap<String, Duration>,
@@ -80,6 +83,7 @@ impl Inner {
             cancels: Mutex::new(HashMap::new()),
             apply_tx,
             apply_rx: Mutex::new(Some(apply_rx)),
+            rejections: StdMutex::new(HashMap::new()),
             request_timeout: cfg.request_timeout,
             transports: transports_for(&cfg.enabled),
             idle_timeouts: idle_timeouts_for(&cfg.enabled),
@@ -115,6 +119,15 @@ impl Runtime {
         Ok(rt)
     }
 
+    /// The reason a job produced no tokens, if it was refused. Consumed.
+    pub fn take_rejection(&self, job_id: JobId) -> Option<String> {
+        self.inner
+            .rejections
+            .lock()
+            .expect("rejections mutex")
+            .remove(&job_id)
+    }
+
     pub fn events(&self) -> Arc<EventLog> {
         Arc::clone(&self.inner.events)
     }
@@ -131,11 +144,12 @@ impl Runtime {
         &self,
         model: &str,
         messages: Vec<ChatMessage>,
+        opts: RunOptions,
     ) -> Result<(JobId, mpsc::Receiver<String>), RuntimeError> {
         self.ensure_enabled(model)?;
         self.ensure_available(model)?;
         let (tx, rx) = mpsc::channel(16);
-        let job_id = self.accept(model, messages, tx).await?;
+        let job_id = self.accept(model, messages, opts, tx).await?;
         Ok((job_id, rx))
     }
 
@@ -195,6 +209,7 @@ impl Runtime {
         job_id: JobId,
         model: &str,
         messages: &[ChatMessage],
+        opts: &RunOptions,
     ) -> Result<mpsc::Receiver<String>, RuntimeError> {
         if !self.sessions().contains_key(&job_id) {
             return Err(RuntimeError::Unknown);
@@ -204,7 +219,10 @@ impl Runtime {
         }
         let token = self.watch(job_id).await;
         let engine = Arc::clone(self.engine(model)?);
-        engine.run(messages, "", token).await.map_err(engine_err)
+        engine
+            .run(messages, "", opts, token)
+            .await
+            .map_err(engine_err)
     }
 
     async fn wait_until_running(&self, job_id: JobId) -> Result<(), RuntimeError> {
@@ -363,6 +381,7 @@ impl Runtime {
         &self,
         model: &str,
         messages: Vec<ChatMessage>,
+        opts: RunOptions,
         tx: mpsc::Sender<String>,
     ) -> Result<JobId, RuntimeError> {
         let mut sched = self.inner.scheduler.lock().await;
@@ -370,7 +389,7 @@ impl Runtime {
             SubmitResult::Accepted { job_id, actions } => (job_id, actions),
             SubmitResult::Rejected { reason } => return Err(reject_err(reason)),
         };
-        self.store_waiter(job_id, model, messages, tx).await;
+        self.store_waiter(job_id, model, messages, opts, tx).await;
         // The scheduler has already moved models in its own books; publish
         // that now so status is truthful while the engines catch up.
         self.record_status(&sched);
@@ -446,11 +465,13 @@ impl Runtime {
         job_id: JobId,
         model: &str,
         messages: Vec<ChatMessage>,
+        opts: RunOptions,
         tx: mpsc::Sender<String>,
     ) {
         let waiter = Waiter {
             model: model.to_string(),
             messages,
+            opts,
             emitted: String::new(),
             tx,
         };
@@ -460,13 +481,15 @@ impl Runtime {
     async fn waiter(
         &self,
         job_id: JobId,
-    ) -> Option<(Vec<ChatMessage>, String, mpsc::Sender<String>)> {
-        self.inner
-            .waiters
-            .lock()
-            .await
-            .get(&job_id)
-            .map(|w| (w.messages.clone(), w.emitted.clone(), w.tx.clone()))
+    ) -> Option<(Vec<ChatMessage>, String, RunOptions, mpsc::Sender<String>)> {
+        self.inner.waiters.lock().await.get(&job_id).map(|w| {
+            (
+                w.messages.clone(),
+                w.emitted.clone(),
+                w.opts.clone(),
+                w.tx.clone(),
+            )
+        })
     }
 
     async fn waiter_model(&self, job_id: JobId) -> Option<String> {
@@ -638,20 +661,47 @@ impl Runtime {
     }
 
     async fn start(&self, job_id: JobId, model: &str) -> Result<(), RuntimeError> {
-        let Some((messages, prefix, tx)) = self.waiter(job_id).await else {
+        let Some((messages, prefix, opts, tx)) = self.waiter(job_id).await else {
             return Ok(());
         };
         let token = self.watch(job_id).await;
         let engine = Arc::clone(self.engine(model)?);
-        let rx = engine
-            .run(&messages, &prefix, token.clone())
-            .await
-            .map_err(engine_err)?;
+        let rx = match engine.run(&messages, &prefix, &opts, token.clone()).await {
+            Ok(rx) => rx,
+            Err(EngineError::Rejected(reason)) => {
+                self.reject(job_id, model, reason);
+                return Ok(());
+            }
+            Err(err) => return Err(engine_err(err)),
+        };
         let rt = self.clone();
         tokio::spawn(async move {
             forward_job(job_id, rx, tx, token, rt).await;
         });
         Ok(())
+    }
+
+    /// The engine refused this request but is healthy: record why, and end
+    /// the job as if it had finished so the model stays resident. The
+    /// scheduler lock may be held by our caller, so the finish runs after.
+    fn reject(&self, job_id: JobId, model: &str, reason: String) {
+        self.emit(
+            Draft::new("reject")
+                .model(model)
+                .job(job_id.0)
+                .error(reason.clone()),
+        );
+        self.inner
+            .rejections
+            .lock()
+            .expect("rejections mutex")
+            .insert(job_id, reason);
+        let rt = self.clone();
+        tokio::spawn(async move {
+            if let Ok(actions) = rt.release_job(job_id).await {
+                rt.enqueue_apply(actions);
+            }
+        });
     }
 
     fn engine(&self, model: &str) -> Result<&Arc<dyn Engine>, RuntimeError> {
@@ -770,7 +820,11 @@ fn idle_timeouts_for(models: &[ConfiguredModel]) -> HashMap<String, Duration> {
 
 fn llama_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {
     warn_missing_llama();
-    Arc::new(LlamaEngine::new(&model.spec.name, model.spec.vram_gb))
+    Arc::new(LlamaEngine::new(
+        &model.spec.name,
+        model.spec.vram_gb,
+        model.ctx_size,
+    ))
 }
 
 fn vllm_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {

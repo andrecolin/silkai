@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use llama_cpp_2::context::params::LlamaContextParams;
@@ -12,11 +13,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::Inner;
-use crate::{last_content, ChatMessage, EngineError};
+use crate::{last_content, ChatMessage, EngineError, RunOptions};
 
 const GPU_SHELF: u32 = 0;
 const GPU_BENCH: u32 = 1000;
-const MAX_NEW_TOKENS: i32 = 256;
+/// Prompt tokens are fed to the model in slices this long.
+const PROMPT_CHUNK: usize = 512;
 
 pub async fn place(
     inner: Arc<Mutex<Inner>>,
@@ -34,16 +36,47 @@ pub fn start_run(
     inner: Arc<Mutex<Inner>>,
     messages: Vec<ChatMessage>,
     prefix: String,
+    opts: RunOptions,
     cancel: CancellationToken,
 ) -> Result<mpsc::Receiver<String>, EngineError> {
-    if !inner.lock().expect("llama engine mutex").on_bench {
-        return Err(EngineError::NotLoaded);
-    }
+    // Render and size the prompt now, so a request that cannot fit is
+    // refused with a reason instead of an empty answer later.
+    let tokens = {
+        let g = inner.lock().expect("llama engine mutex");
+        if !g.on_bench {
+            return Err(EngineError::NotLoaded);
+        }
+        let model = g.model.as_ref().ok_or(EngineError::NotLoaded)?;
+        prompt_tokens(model, &messages, &prefix, g.ctx_size as usize)?
+    };
     let (tx, rx) = mpsc::channel(16);
     tokio::task::spawn_blocking(move || {
-        let _ = generate(&inner, &messages, &prefix, tx, cancel);
+        if let Err(err) = generate(&inner, &tokens, &opts, tx.clone(), cancel) {
+            eprintln!("llama.cpp generate failed: {err}");
+        }
     });
     Ok(rx)
+}
+
+fn prompt_tokens(
+    model: &LlamaModel,
+    messages: &[ChatMessage],
+    prefix: &str,
+    n_ctx: usize,
+) -> Result<Vec<LlamaToken>, EngineError> {
+    let prompt = render_prompt(model, messages, prefix);
+    // Templates emit their own BOS marker; adding another confuses most models.
+    let tokens = model.str_to_token(&prompt, AddBos::Never).map_err(other)?;
+    if tokens.is_empty() {
+        return Err(EngineError::Rejected("empty prompt".into()));
+    }
+    if tokens.len() >= n_ctx {
+        return Err(EngineError::Rejected(format!(
+            "prompt is {} tokens but ctx_size is {n_ctx}; raise ctx_size on this model",
+            tokens.len()
+        )));
+    }
+    Ok(tokens)
 }
 
 /// Render the chat through the GGUF's own template (so instruct models see
@@ -94,63 +127,77 @@ fn load_model(path: &str, layers: u32, gpu: u32) -> Result<LlamaModel, EngineErr
 
 fn generate(
     inner: &Mutex<Inner>,
-    messages: &[ChatMessage],
-    prefix: &str,
+    tokens: &[LlamaToken],
+    opts: &RunOptions,
     tx: mpsc::Sender<String>,
     cancel: CancellationToken,
 ) -> Result<(), EngineError> {
     let g = inner.lock().expect("llama engine mutex");
     let model = g.model.as_ref().ok_or(EngineError::NotLoaded)?;
-    let prompt = render_prompt(model, messages, prefix);
-    let mut ctx = model
-        .new_context(backend()?, LlamaContextParams::default())
-        .map_err(other)?;
-    infer(model, &mut ctx, &prompt, tx, cancel)
+    let params = LlamaContextParams::default()
+        .with_n_ctx(NonZeroU32::new(g.ctx_size))
+        .with_n_batch(PROMPT_CHUNK as u32);
+    let mut ctx = model.new_context(backend()?, params).map_err(other)?;
+    let mut batch = LlamaBatch::new(PROMPT_CHUNK, 1);
+    feed_prompt(&mut ctx, &mut batch, tokens)?;
+    sample_loop(model, &mut ctx, batch, tokens.len(), opts, tx, cancel)
 }
 
-fn infer(
-    model: &LlamaModel,
+/// Decode the prompt in slices no longer than the batch, logits only on
+/// the final token.
+fn feed_prompt(
     ctx: &mut LlamaContext<'_>,
-    prompt: &str,
-    tx: mpsc::Sender<String>,
-    cancel: CancellationToken,
+    batch: &mut LlamaBatch<'_>,
+    tokens: &[LlamaToken],
 ) -> Result<(), EngineError> {
-    // Templates emit their own BOS marker; adding another confuses most models.
-    let tokens = model.str_to_token(prompt, AddBos::Never).map_err(other)?;
-    if tokens.is_empty() {
-        return Err(EngineError::Other("empty prompt tokens".into()));
-    }
-    let mut batch = LlamaBatch::new(tokens.len() + 64, 1);
-    fill_prompt(&mut batch, &tokens)?;
-    ctx.decode(&mut batch).map_err(other)?;
-    sample_loop(model, ctx, batch, tx, cancel)
-}
-
-fn fill_prompt(batch: &mut LlamaBatch<'_>, tokens: &[LlamaToken]) -> Result<(), EngineError> {
     let last = tokens.len() - 1;
-    for (i, token) in tokens.iter().enumerate() {
-        batch
-            .add(*token, i as i32, &[0], i == last)
-            .map_err(other)?;
+    for (chunk_index, chunk) in tokens.chunks(PROMPT_CHUNK).enumerate() {
+        batch.clear();
+        for (j, token) in chunk.iter().enumerate() {
+            let pos = chunk_index * PROMPT_CHUNK + j;
+            batch
+                .add(*token, pos as i32, &[0], pos == last)
+                .map_err(other)?;
+        }
+        ctx.decode(batch).map_err(other)?;
     }
     Ok(())
+}
+
+fn sampler_for(opts: &RunOptions) -> LlamaSampler {
+    match opts.temperature {
+        Some(t) if t > 0.0 => {
+            LlamaSampler::chain_simple([LlamaSampler::temp(t), LlamaSampler::dist(0)])
+        }
+        _ => LlamaSampler::greedy(),
+    }
 }
 
 fn sample_loop(
     model: &LlamaModel,
     ctx: &mut LlamaContext<'_>,
     mut batch: LlamaBatch<'_>,
+    prompt_len: usize,
+    opts: &RunOptions,
     tx: mpsc::Sender<String>,
     cancel: CancellationToken,
 ) -> Result<(), EngineError> {
-    let mut sampler = LlamaSampler::greedy();
-    let mut n_cur = batch.n_tokens();
-    let n_ctx = ctx.n_ctx() as i32;
-    while n_cur < n_ctx && n_cur < MAX_NEW_TOKENS && !cancel.is_cancelled() {
-        if !emit_next(model, ctx, &mut batch, &mut sampler, n_cur, &tx)? {
+    let mut sampler = sampler_for(opts);
+    let n_ctx = ctx.n_ctx() as usize;
+    // New tokens are capped by the request, else by the room left in the window.
+    let room = n_ctx - prompt_len;
+    let limit = opts
+        .max_tokens
+        .map(|m| (m as usize).min(room))
+        .unwrap_or(room);
+    let mut pos = prompt_len;
+    let mut produced = 0;
+    while produced < limit && !cancel.is_cancelled() {
+        if !emit_next(model, ctx, &mut batch, &mut sampler, pos, &tx)? {
             break;
         }
-        n_cur += 1;
+        pos += 1;
+        produced += 1;
     }
     Ok(())
 }
@@ -160,7 +207,7 @@ fn emit_next(
     ctx: &mut LlamaContext<'_>,
     batch: &mut LlamaBatch<'_>,
     sampler: &mut LlamaSampler,
-    n_cur: i32,
+    pos: usize,
     tx: &mpsc::Sender<String>,
 ) -> Result<bool, EngineError> {
     let token = sampler.sample(ctx, batch.n_tokens() - 1);
@@ -172,7 +219,7 @@ fn emit_next(
         return Ok(false);
     }
     batch.clear();
-    batch.add(token, n_cur, &[0], true).map_err(other)?;
+    batch.add(token, pos as i32, &[0], true).map_err(other)?;
     ctx.decode(batch).map_err(other)?;
     Ok(true)
 }

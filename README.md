@@ -158,6 +158,8 @@ The whole `messages` list reaches the engine: system prompts, history,
 and assistant turns are forwarded as sent (llama-server, vLLM, and Ollama
 apply the model's chat template; the in-process llama.cpp engine applies
 the GGUF's own template). `content` may be a string or a list of text parts.
+`max_tokens` and `temperature` are forwarded too; anything else in the
+body is ignored for now. Errors come back with the reason in the body.
 
 Streaming: `"stream": true` (SSE). Also `GET /v1/models` and `GET /v1/status`
 (models plus per-GPU `used_gb` / `schedulable_gb`). The daemon logs load, wake,
@@ -183,7 +185,12 @@ See `examples/config.toml` for VRAM, `priority` (`live` | `normal` | `background
 
 Build llama.cpp support with `cargo run -p silkai --features llama` (CPU) or
 `--features llama,cuda` / `llama,vulkan` / `llama,metal`, and set
-`engine = "llama.cpp"` plus a GGUF `path` on that model.
+`engine = "llama.cpp"` plus a GGUF `path` on that model. `ctx_size` sets
+the context window (default 4096); a prompt that does not fit is refused
+with a message rather than answered with nothing. This engine is the
+experimental one: it re-reads the file on every wake instead of keeping a
+RAM copy, and one request runs at a time per model. `engine = "process"`
+with `llama-server` is the path to prefer.
 
 vLLM is an HTTP adapter, not a built-in runner. Start vLLM yourself (sleep
 mode needs `VLLM_SERVER_DEV_MODE=1` and `--enable-sleep-mode`), then:

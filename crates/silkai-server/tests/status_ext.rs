@@ -14,6 +14,7 @@ fn model(name: &str, engine: &str, vram: f64) -> ConfiguredModel {
         cmd: Vec::new(),
         transport: "http".into(),
         idle_timeout_secs: None,
+        ctx_size: None,
         spec: ModelSpec {
             name: name.into(),
             vram_gb: vram,
@@ -73,7 +74,7 @@ async fn loading_state_shows_while_load_is_in_flight() {
     let submit = {
         let rt = rt.clone();
         tokio::spawn(async move {
-            rt.submit_chat("held", vec![ChatMessage::user("hi")])
+            rt.submit_chat("held", vec![ChatMessage::user("hi")], Default::default())
                 .await
                 .unwrap()
         })
