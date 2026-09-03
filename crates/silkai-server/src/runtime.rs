@@ -10,6 +10,8 @@ use silkai_sched::{
     Action, JobId, RejectReason, SchedError, Scheduler, StatusSnapshot, SubmitResult,
 };
 
+use crate::events::{Draft, EventLog};
+use crate::metrics::{Counters, Metrics};
 use crate::sampler::{self, Sample};
 use crate::status::{self, ModelFacts, Status};
 use tokio::sync::{mpsc, Mutex};
@@ -34,6 +36,7 @@ pub enum RuntimeError {
 }
 
 struct Waiter {
+    model: String,
     messages: Vec<ChatMessage>,
     emitted: String,
     tx: mpsc::Sender<String>,
@@ -59,10 +62,12 @@ struct Inner {
     /// `loading` or `sleeping` while an engine call is in flight.
     overlays: StdMutex<HashMap<String, &'static str>>,
     sample: sampler::Shared,
+    events: Arc<EventLog>,
+    metrics: Metrics,
 }
 
 impl Inner {
-    fn new(scheduler: Scheduler, cfg: &AppConfig) -> Self {
+    fn new(scheduler: Scheduler, cfg: &AppConfig, events: Arc<EventLog>) -> Self {
         let (apply_tx, apply_rx) = mpsc::unbounded_channel();
         Self {
             snapshot: StdMutex::new(scheduler.status()),
@@ -86,6 +91,8 @@ impl Inner {
                 .collect(),
             overlays: StdMutex::new(HashMap::new()),
             sample: sampler::start(),
+            events,
+            metrics: Metrics::default(),
         }
     }
 }
@@ -97,10 +104,27 @@ pub struct Runtime {
 
 impl Runtime {
     pub async fn new(cfg: AppConfig) -> Result<Self, RuntimeError> {
-        let (rt, warmup) = Self::assemble(cfg)?;
+        Self::with_events(cfg, Arc::new(EventLog::new())).await
+    }
+
+    /// Build on an existing event log, so a reload keeps the history.
+    pub async fn with_events(cfg: AppConfig, events: Arc<EventLog>) -> Result<Self, RuntimeError> {
+        let (rt, warmup) = Self::assemble(cfg, events)?;
         rt.spawn_applier().await;
         rt.apply_all(warmup).await?;
         Ok(rt)
+    }
+
+    pub fn events(&self) -> Arc<EventLog> {
+        Arc::clone(&self.inner.events)
+    }
+
+    pub fn counters(&self) -> HashMap<String, Counters> {
+        self.inner.metrics.snapshot()
+    }
+
+    fn emit(&self, draft: Draft) {
+        self.inner.events.emit(draft);
     }
 
     pub async fn submit_chat(
@@ -151,10 +175,11 @@ impl Runtime {
         };
         self.sessions().insert(job_id, model.to_string());
         drop(sched);
+        self.emit(Draft::new("session_open").model(model).job(job_id.0));
         if let Err(err) = self.apply_all(actions).await {
             self.sessions().remove(&job_id);
             let mut sched = self.inner.scheduler.lock().await;
-            self.isolate(&mut sched, job_id).await;
+            self.isolate(&mut sched, job_id, Some(model), &err).await;
             return Err(err);
         }
         let sched = self.inner.scheduler.lock().await;
@@ -199,7 +224,9 @@ impl Runtime {
     }
 
     pub async fn end_session(&self, job_id: JobId) {
-        self.sessions().remove(&job_id);
+        if let Some(model) = self.sessions().remove(&job_id) {
+            self.emit(Draft::new("session_close").model(model).job(job_id.0));
+        }
         self.drop_job(job_id).await;
     }
 
@@ -297,7 +324,10 @@ impl Runtime {
 }
 
 impl Runtime {
-    fn assemble(cfg: AppConfig) -> Result<(Self, Vec<Action>), RuntimeError> {
+    fn assemble(
+        cfg: AppConfig,
+        events: Arc<EventLog>,
+    ) -> Result<(Self, Vec<Action>), RuntimeError> {
         let specs = cfg
             .enabled
             .iter()
@@ -307,7 +337,7 @@ impl Runtime {
         let mut scheduler = Scheduler::new(cfg.resources.clone(), specs).map_err(sched_err)?;
         let warmup = prefetch_actions(&mut scheduler, cfg.prefetch_on_start);
         let rt = Self {
-            inner: Arc::new(Inner::new(scheduler, &cfg)),
+            inner: Arc::new(Inner::new(scheduler, &cfg, events)),
         };
         Ok((rt, warmup))
     }
@@ -339,9 +369,9 @@ impl Runtime {
             SubmitResult::Accepted { job_id, actions } => (job_id, actions),
             SubmitResult::Rejected { reason } => return Err(reject_err(reason)),
         };
-        self.store_waiter(job_id, messages, tx).await;
+        self.store_waiter(job_id, model, messages, tx).await;
         if let Err(err) = self.apply_all(actions).await {
-            self.isolate(&mut sched, job_id).await;
+            self.isolate(&mut sched, job_id, Some(model), &err).await;
             return Err(err);
         }
         self.record_status(&sched);
@@ -361,7 +391,13 @@ impl Runtime {
         let actions = sched.finish(job_id);
         self.record_status(&sched);
         drop(sched);
+        let model = self.waiter_model(job_id).await;
         self.forget(job_id).await;
+        let mut draft = Draft::new("finish").job(job_id.0);
+        if let Some(model) = model {
+            draft = draft.model(model);
+        }
+        self.emit(draft);
         Ok(actions)
     }
 
@@ -403,10 +439,12 @@ impl Runtime {
     async fn store_waiter(
         &self,
         job_id: JobId,
+        model: &str,
         messages: Vec<ChatMessage>,
         tx: mpsc::Sender<String>,
     ) {
         let waiter = Waiter {
+            model: model.to_string(),
             messages,
             emitted: String::new(),
             tx,
@@ -424,6 +462,15 @@ impl Runtime {
             .await
             .get(&job_id)
             .map(|w| (w.messages.clone(), w.emitted.clone(), w.tx.clone()))
+    }
+
+    async fn waiter_model(&self, job_id: JobId) -> Option<String> {
+        self.inner
+            .waiters
+            .lock()
+            .await
+            .get(&job_id)
+            .map(|w| w.model.clone())
     }
 
     async fn append_emitted(&self, job_id: JobId, chunk: &str) {
@@ -449,8 +496,19 @@ impl Runtime {
         self.inner.waiters.lock().await.remove(&job_id);
     }
 
-    async fn isolate(&self, sched: &mut Scheduler, job_id: JobId) {
-        tracing::warn!(job_id = job_id.0, "engine fault");
+    async fn isolate(
+        &self,
+        sched: &mut Scheduler,
+        job_id: JobId,
+        model: Option<&str>,
+        err: &RuntimeError,
+    ) {
+        let mut draft = Draft::new("fault").job(job_id.0).error(err.to_string());
+        if let Some(model) = model {
+            draft = draft.model(model);
+            self.inner.metrics.bump(model, |c| c.faults += 1);
+        }
+        self.emit(draft);
         let actions = sched.fault(job_id);
         self.record_status(sched);
         self.forget(job_id).await;
@@ -465,18 +523,64 @@ impl Runtime {
     }
 
     async fn apply(&self, action: Action) -> Result<(), RuntimeError> {
-        if let Some(line) = action_log(&action) {
-            tracing::info!("{line}");
+        let started = std::time::Instant::now();
+        let result = match &action {
+            Action::Warm { model } => self.warm(model).await,
+            Action::Load { model, gpu } => self.load(model, *gpu).await,
+            Action::Wake { model, gpu } => self.wake(model, *gpu).await,
+            Action::Sleep { model } => self.sleep(model).await,
+            Action::Discard { model } => self.discard(model).await,
+            Action::Preempt { job_id } => self.preempt(*job_id).await,
+            Action::Start { job_id, model } => self.start(*job_id, model).await,
+        };
+        self.record_action(&action, started.elapsed(), &result)
+            .await;
+        result
+    }
+
+    async fn record_action(
+        &self,
+        action: &Action,
+        took: Duration,
+        result: &Result<(), RuntimeError>,
+    ) {
+        let ms = took.as_millis() as u64;
+        let secs = took.as_secs_f64();
+        let mut draft = match action {
+            Action::Warm { model } => Draft::new("warm").model(model),
+            Action::Load { model, gpu } => {
+                self.inner.metrics.bump(model, |c| {
+                    c.loads += 1;
+                    c.load_secs += secs;
+                });
+                Draft::new("load").model(model).gpu(*gpu).ms(ms)
+            }
+            Action::Wake { model, gpu } => {
+                self.inner.metrics.bump(model, |c| {
+                    c.wakes += 1;
+                    c.load_secs += secs;
+                });
+                Draft::new("wake").model(model).gpu(*gpu).ms(ms)
+            }
+            Action::Sleep { model } => {
+                self.inner.metrics.bump(model, |c| c.sleeps += 1);
+                Draft::new("sleep").model(model).ms(ms)
+            }
+            Action::Discard { model } => Draft::new("discard").model(model),
+            Action::Preempt { job_id } => {
+                let mut d = Draft::new("preempt").job(job_id.0);
+                if let Some(model) = self.waiter_model(*job_id).await {
+                    self.inner.metrics.bump(&model, |c| c.preempts += 1);
+                    d = d.model(model);
+                }
+                d
+            }
+            Action::Start { job_id, model } => Draft::new("start").model(model).job(job_id.0),
+        };
+        if let Err(err) = result {
+            draft = draft.error(err.to_string());
         }
-        match action {
-            Action::Warm { model } => self.warm(&model).await,
-            Action::Load { model, gpu } => self.load(&model, gpu).await,
-            Action::Wake { model, gpu } => self.wake(&model, gpu).await,
-            Action::Sleep { model } => self.sleep(&model).await,
-            Action::Discard { model } => self.discard(&model).await,
-            Action::Preempt { job_id } => self.preempt(job_id).await,
-            Action::Start { job_id, model } => self.start(job_id, &model).await,
-        }
+        self.emit(draft);
     }
 
     async fn warm(&self, model: &str) -> Result<(), RuntimeError> {
@@ -746,69 +850,4 @@ fn reject_err(reason: RejectReason) -> RuntimeError {
 
 fn missing(kind: &str, model: &str) -> RuntimeError {
     RuntimeError::Engine(EngineError::Other(format!("no {kind}: {model}")))
-}
-
-fn action_log(action: &Action) -> Option<String> {
-    match action {
-        Action::Load { model, gpu } => Some(format!("load {model} gpu={gpu}")),
-        Action::Wake { model, gpu } => Some(format!("wake {model} gpu={gpu}")),
-        Action::Sleep { model } => Some(format!("sleep {model}")),
-        Action::Discard { model } => Some(format!("discard {model}")),
-        Action::Warm { model } => Some(format!("warm {model}")),
-        Action::Preempt { job_id } => Some(format!("preempt job={}", job_id.0)),
-        Action::Start { .. } => None,
-    }
-}
-
-#[cfg(test)]
-mod action_log_tests {
-    use silkai_sched::{Action, JobId};
-
-    use super::action_log;
-
-    #[test]
-    fn load_names_model_and_gpu() {
-        let line = action_log(&Action::Load {
-            model: "write".into(),
-            gpu: 1,
-        })
-        .unwrap();
-        assert_eq!(line, "load write gpu=1");
-    }
-
-    #[test]
-    fn wake_names_model_and_gpu() {
-        let line = action_log(&Action::Wake {
-            model: "write".into(),
-            gpu: 0,
-        })
-        .unwrap();
-        assert_eq!(line, "wake write gpu=0");
-    }
-
-    #[test]
-    fn sleep_names_model() {
-        let line = action_log(&Action::Sleep {
-            model: "write".into(),
-        })
-        .unwrap();
-        assert_eq!(line, "sleep write");
-    }
-
-    #[test]
-    fn preempt_names_job() {
-        let line = action_log(&Action::Preempt { job_id: JobId(7) }).unwrap();
-        assert_eq!(line, "preempt job=7");
-    }
-
-    #[test]
-    fn start_is_silent() {
-        assert_eq!(
-            action_log(&Action::Start {
-                job_id: JobId(1),
-                model: "write".into(),
-            }),
-            None
-        );
-    }
 }

@@ -1,5 +1,7 @@
 pub mod app;
 pub mod config;
+pub mod events;
+pub mod metrics;
 pub mod runtime;
 pub mod sampler;
 pub mod status;
