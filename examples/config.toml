@@ -29,12 +29,12 @@ request_timeout_secs = 600
 # headroom_gb = 3
 # One model on both cards (layer/tensor split): gpus = [0, 1]
 
-# Live speech-to-text: two people can share this copy.
-[models.transcribe]
+# Live speech-to-text (whisper): two people can share this copy.
+[models.whisper]
 engine = "fake"
 # engine = "llama.cpp"
-path = "/models/transcribe.bin"
-vram_gb = 12
+path = "/models/whisper.bin"
+vram_gb = 3
 priority = "live"
 exclusive = false
 slots = 2
@@ -43,8 +43,8 @@ transport = "both"
 # transport = "websocket"  # session socket only
 # transport = "http"       # POST /v1/chat/completions only
 
-# Large writer: needs the GPU to itself (summaries, emails, long answers).
-[models.write]
+# SOAP-note writer: needs the GPU to itself.
+[models.soap]
 engine = "fake"
 # engine = "llama.cpp"
 # engine = "vllm"
@@ -52,24 +52,24 @@ engine = "fake"
 # engine = "process"
 # cmd = ["vllm", "serve", "Qwen/Qwen3-0.6B", "--port", "8001"]
 # url = "http://127.0.0.1:8001"     # process: must match --port
-path = "/models/write-q4.gguf"
+path = "/models/soap-q4.gguf"
 # path = "Qwen/Qwen3-0.6B"          # vLLM model id
 # path = "llama3.2"                 # Ollama model name
 # url = "http://127.0.0.1:8000"     # vLLM base URL (default)
 # url = "http://127.0.0.1:11434"    # Ollama base URL (default)
-vram_gb = 28
+vram_gb = 26
 priority = "normal"
 exclusive = true
 slots = 1
 keep_warm = true
 transport = "http"
 
-# Small indexer / tagger: runs in leftover space only.
-[models.index]
+# Chart reader: runs in leftover space only.
+[models.chart]
 engine = "fake"
 # engine = "llama.cpp"
-path = "/models/index-q4.gguf"
-vram_gb = 10
+path = "/models/chart-q4.gguf"
+vram_gb = 5
 priority = "background"
 exclusive = false
 slots = 1
