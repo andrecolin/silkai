@@ -49,7 +49,7 @@ Here is a visit, as SilkAI sees it:
    the card in a second or two. If `soap` was still loading when the request
    came in, that load is abandoned rather than waited for.
 
-![128 GB of RAM keeps both models warm; the card holds only the one that is working, plus a small slice for the desktop](docs/silkai-memory.svg)
+![128 GB of RAM keeps both models warm; the card holds only the one that is working, plus a small slice for the server](docs/silkai-memory.svg)
 
 SilkAI carries text, not audio. The app sends speech to the speech engine
 directly; SilkAI's job is to keep that engine on the card while the doctor
@@ -78,8 +78,9 @@ What that adds up to:
 
 Needs Rust 1.80+ ([rustup](https://rustup.rs)) and a
 [llama.cpp](https://github.com/ggml-org/llama.cpp) build with `llama-server`
-on your `PATH`. SilkAI starts and stops it for you; there is no CUDA build of
-SilkAI itself.
+on your `PATH`. SilkAI starts and stops it for you; the default build has no
+CUDA in it and does not need any. (An optional in-process engine can be built
+against CUDA; see [Engines](#engines).)
 
 ```bash
 cargo install silkai --locked
@@ -104,7 +105,7 @@ The config is `~/.config/silkai/config.toml`, or whatever `SILKAI_CONFIG` or
 listen = "127.0.0.1:8080"
 
 [resources]
-gpu_headroom_gb = 3        # left free on each card for the desktop and the driver
+gpu_headroom_gb = 3        # left free on each card for the rest of the machine and the driver
 ram_headroom_gb = 16       # left free for the OS
 prefetch_on_start = true   # warm keep_warm models at start
 request_timeout_secs = 600
