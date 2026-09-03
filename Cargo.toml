@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/andrecolin/silkai"
@@ -18,6 +18,6 @@ keywords = ["gpu", "llm", "scheduler", "llama-cpp", "inference"]
 categories = ["command-line-utilities"]
 
 [workspace.dependencies]
-silkai-sched = { path = "crates/silkai-sched", version = "0.1.0" }
-silkai-adapters = { path = "crates/silkai-adapters", version = "0.1.0" }
-silkai-server = { path = "crates/silkai-server", version = "0.1.0" }
+silkai-sched = { path = "crates/silkai-sched", version = "0.5.0" }
+silkai-adapters = { path = "crates/silkai-adapters", version = "0.5.0" }
+silkai-server = { path = "crates/silkai-server", version = "0.5.0" }
