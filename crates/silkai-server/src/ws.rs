@@ -20,7 +20,8 @@ pub struct SessionQuery {
 
 /// `{"type":"prompt","content":"..."}` sends one user turn. Send
 /// `{"type":"prompt","messages":[{"role":"system","content":"..."},...]}`
-/// to give the model a system prompt or history instead.
+/// to give the model a system prompt or history instead. `{"type":"ping"}`
+/// keeps the session open without running anything.
 #[derive(Deserialize)]
 struct ClientMsg {
     #[serde(rename = "type")]
@@ -93,6 +94,7 @@ async fn run_session(mut socket: WebSocket, rt: Arc<Runtime>, model: String) {
                 let _ = send_json(&mut socket, "idle_close", None, None).await;
                 break;
             }
+            Recv::Keepalive => continue,
             Recv::Closed => break,
             Recv::Prompt(messages, opts) => {
                 if let Err(err) =
@@ -113,6 +115,11 @@ async fn run_session(mut socket: WebSocket, rt: Arc<Runtime>, model: String) {
 enum Recv {
     Prompt(Vec<ChatMessage>, RunOptions),
     Stop,
+    /// A ping, a pong, or `{"type":"ping"}`: hold the model on the card and
+    /// start the idle timer again. A session that pins a model while the app
+    /// talks to the engine directly has no prompts to send, so this is the
+    /// only way it can stay open.
+    Keepalive,
     Idle,
     Closed,
 }
@@ -122,6 +129,8 @@ async fn recv_or_idle(socket: &mut WebSocket, idle: Duration) -> Recv {
         Ok(None) | Ok(Some(Err(_))) => Recv::Closed,
         Ok(Some(Ok(Message::Close(_)))) => Recv::Closed,
         Ok(Some(Ok(Message::Text(text)))) => parse_client(&text),
+        // axum answers a ping itself; we only have to not treat it as a close.
+        Ok(Some(Ok(Message::Ping(_)))) | Ok(Some(Ok(Message::Pong(_)))) => Recv::Keepalive,
         Ok(Some(Ok(_))) => Recv::Closed,
         Err(_) => Recv::Idle,
     }
@@ -137,6 +146,7 @@ fn parse_client(text: &str) -> Recv {
             Recv::Prompt(messages, opts)
         }
         "stop" => Recv::Stop,
+        "ping" => Recv::Keepalive,
         _ => Recv::Closed,
     }
 }
@@ -174,4 +184,32 @@ async fn send_json(
         .await
         .map_err(|e| RuntimeError::Engine(silkai_adapters::EngineError::Other(e.to_string())))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ping_is_a_keepalive_not_a_close() {
+        assert!(matches!(
+            parse_client(r#"{"type":"ping"}"#),
+            Recv::Keepalive
+        ));
+    }
+
+    #[test]
+    fn stop_and_prompt_still_parse() {
+        assert!(matches!(parse_client(r#"{"type":"stop"}"#), Recv::Stop));
+        assert!(matches!(
+            parse_client(r#"{"type":"prompt","content":"hi"}"#),
+            Recv::Prompt(..)
+        ));
+    }
+
+    #[test]
+    fn unknown_types_and_junk_still_close() {
+        assert!(matches!(parse_client(r#"{"type":"nope"}"#), Recv::Closed));
+        assert!(matches!(parse_client("not json"), Recv::Closed));
+    }
 }

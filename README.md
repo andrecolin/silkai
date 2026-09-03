@@ -238,6 +238,12 @@ Send `{"type":"prompt","content":"..."}` (or `"messages": [...]` with
 `max_tokens` / `temperature`) and read `token` messages until `done`. The
 app decides what to do with the text next; SilkAI does not chain models.
 
+A session that only pins a model has nothing to send. Hold it open with a
+WebSocket ping or `{"type":"ping"}`; either one restarts the idle timer
+without running anything. This is the shape to use for a speech engine: pin
+it for as long as the microphone is open, send the audio to the engine
+directly, and let SilkAI keep it on the card.
+
 ## Watch it
 
 Every daemon serves:
