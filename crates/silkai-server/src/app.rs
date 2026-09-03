@@ -286,8 +286,34 @@ async fn chat_completions(
     let model = req.model;
     let messages = messages_of(req.messages);
     match rt.submit_chat(&model, messages, opts).await {
-        Ok((job, rx)) => finish_chat(&rt, job, rx, req.stream).await,
+        Ok((job, rx)) => {
+            let meta = Meta::new(job, model);
+            finish_chat(&rt, meta, rx, req.stream).await
+        }
         Err(err) => chat_error(err).into_response(),
+    }
+}
+
+/// The identifying fields every OpenAI-shaped reply carries.
+#[derive(Clone)]
+struct Meta {
+    job: JobId,
+    id: String,
+    model: String,
+    created: u64,
+}
+
+impl Meta {
+    fn new(job: JobId, model: String) -> Self {
+        Self {
+            job,
+            id: format!("chatcmpl-{}", job.0),
+            model,
+            created: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        }
     }
 }
 
@@ -326,36 +352,36 @@ fn messages_of(wire: Vec<WireMessage>) -> Vec<ChatMessage> {
 
 async fn finish_chat(
     rt: &Runtime,
-    job: JobId,
+    meta: Meta,
     rx: mpsc::Receiver<String>,
     stream: bool,
 ) -> Response {
     if stream {
-        stream_or_timeout(rt, job, rx).await
+        stream_or_timeout(rt, meta, rx).await
     } else {
-        json_or_timeout(rt, job, rx).await
+        json_or_timeout(rt, meta, rx).await
     }
 }
 
-async fn stream_or_timeout(rt: &Runtime, job: JobId, mut rx: mpsc::Receiver<String>) -> Response {
+async fn stream_or_timeout(rt: &Runtime, meta: Meta, mut rx: mpsc::Receiver<String>) -> Response {
     match tokio::time::timeout(rt.request_timeout(), rx.recv()).await {
-        Ok(None) => match rt.take_rejection(job) {
+        Ok(None) => match rt.take_rejection(meta.job) {
             Some(reason) => (StatusCode::BAD_REQUEST, reason).into_response(),
-            None => sse_response(job, None, rx),
+            None => sse_response(meta, None, rx),
         },
-        Ok(first) => sse_response(job, first, rx),
-        Err(_) => timeout_drop(rt, job).await,
+        Ok(first) => sse_response(meta, first, rx),
+        Err(_) => timeout_drop(rt, meta.job).await,
     }
 }
 
-async fn json_or_timeout(rt: &Runtime, job: JobId, rx: mpsc::Receiver<String>) -> Response {
+async fn json_or_timeout(rt: &Runtime, meta: Meta, rx: mpsc::Receiver<String>) -> Response {
     match tokio::time::timeout(rt.request_timeout(), collect_tokens(rx)).await {
-        Ok(tokens) if tokens.is_empty() => match rt.take_rejection(job) {
+        Ok(tokens) if tokens.is_empty() => match rt.take_rejection(meta.job) {
             Some(reason) => (StatusCode::BAD_REQUEST, reason).into_response(),
-            None => json_completion(&tokens),
+            None => json_completion(&meta, &tokens),
         },
-        Ok(tokens) => json_completion(&tokens),
-        Err(_) => timeout_drop(rt, job).await,
+        Ok(tokens) => json_completion(&meta, &tokens),
+        Err(_) => timeout_drop(rt, meta.job).await,
     }
 }
 
@@ -372,8 +398,10 @@ async fn collect_tokens(mut rx: mpsc::Receiver<String>) -> Vec<String> {
     tokens
 }
 
-fn sse_response(job: JobId, first: Option<String>, rx: mpsc::Receiver<String>) -> Response {
-    let start = SsePhase::Comment { job, first, rx };
+/// The stream: a `: queued` comment, a role chunk, one chunk per token,
+/// a closing chunk with `finish_reason: "stop"`, then `[DONE]`.
+fn sse_response(meta: Meta, first: Option<String>, rx: mpsc::Receiver<String>) -> Response {
+    let start = SsePhase::Comment { meta, first, rx };
     Sse::new(unfold(start, |phase| async move {
         let (event, next) = next_sse(phase).await?;
         Some((Ok::<_, Infallible>(event), next))
@@ -383,86 +411,108 @@ fn sse_response(job: JobId, first: Option<String>, rx: mpsc::Receiver<String>) -
 
 enum SsePhase {
     Comment {
-        job: JobId,
+        meta: Meta,
         first: Option<String>,
         rx: mpsc::Receiver<String>,
     },
-    Tokens {
-        job: JobId,
+    Role {
+        meta: Meta,
         pending: Option<String>,
         rx: mpsc::Receiver<String>,
     },
+    Tokens {
+        meta: Meta,
+        pending: Option<String>,
+        rx: mpsc::Receiver<String>,
+    },
+    Stop,
     Done,
 }
 
 async fn next_sse(phase: SsePhase) -> Option<(Event, SsePhase)> {
     match phase {
-        SsePhase::Comment { job, first, rx } => Some(queued_then(job, first, rx)),
-        SsePhase::Tokens { job, pending, rx } => token_or_done(job, pending, rx).await,
+        SsePhase::Comment { meta, first, rx } => Some((
+            Event::default().comment("queued"),
+            SsePhase::Role {
+                meta,
+                pending: first,
+                rx,
+            },
+        )),
+        SsePhase::Role { meta, pending, rx } => Some((
+            Event::default().data(chunk_json(&meta, Delta::Role, None)),
+            SsePhase::Tokens { meta, pending, rx },
+        )),
+        SsePhase::Tokens { meta, pending, rx } => token_or_stop(meta, pending, rx).await,
+        SsePhase::Stop => Some((Event::default().data("[DONE]"), SsePhase::Done)),
         SsePhase::Done => None,
     }
 }
 
-fn queued_then(job: JobId, first: Option<String>, rx: mpsc::Receiver<String>) -> (Event, SsePhase) {
-    (
-        Event::default().comment("queued"),
-        SsePhase::Tokens {
-            job,
-            pending: first,
-            rx,
-        },
-    )
-}
-
-async fn token_or_done(
-    job: JobId,
+async fn token_or_stop(
+    meta: Meta,
     pending: Option<String>,
     mut rx: mpsc::Receiver<String>,
 ) -> Option<(Event, SsePhase)> {
-    match pending {
-        Some(token) => Some(data_then_rest(job, token, rx)),
-        None => match rx.recv().await {
-            Some(token) => Some(data_then_rest(job, token, rx)),
-            None => Some((Event::default().data("[DONE]"), SsePhase::Done)),
-        },
+    let next = match pending {
+        Some(token) => Some(token),
+        None => rx.recv().await,
+    };
+    match next {
+        Some(token) => Some((
+            Event::default().data(chunk_json(&meta, Delta::Content(&token), None)),
+            SsePhase::Tokens {
+                meta,
+                pending: None,
+                rx,
+            },
+        )),
+        None => Some((
+            Event::default().data(chunk_json(&meta, Delta::Empty, Some("stop"))),
+            SsePhase::Stop,
+        )),
     }
 }
 
-fn data_then_rest(job: JobId, token: String, rx: mpsc::Receiver<String>) -> (Event, SsePhase) {
-    (
-        data_event(job, &token),
-        SsePhase::Tokens {
-            job,
-            pending: None,
-            rx,
-        },
-    )
+enum Delta<'a> {
+    Role,
+    Content(&'a str),
+    Empty,
 }
 
-fn data_event(job: JobId, token: &str) -> Event {
-    Event::default().data(chunk_json(job, token))
-}
-
-fn chunk_json(job: JobId, token: &str) -> String {
+fn chunk_json(meta: &Meta, delta: Delta<'_>, finish: Option<&str>) -> String {
+    let delta = match delta {
+        Delta::Role => serde_json::json!({"role": "assistant", "content": ""}),
+        Delta::Content(text) => serde_json::json!({"content": text}),
+        Delta::Empty => serde_json::json!({}),
+    };
     serde_json::json!({
-        "id": format!("job-{}", job.0),
+        "id": meta.id,
         "object": "chat.completion.chunk",
+        "created": meta.created,
+        "model": meta.model,
         "choices": [{
             "index": 0,
-            "delta": {"content": token},
-            "finish_reason": null
+            "delta": delta,
+            "finish_reason": finish
         }]
     })
     .to_string()
 }
 
-fn json_completion(tokens: &[String]) -> Response {
+fn json_completion(meta: &Meta, tokens: &[String]) -> Response {
     Json(serde_json::json!({
+        "id": meta.id,
+        "object": "chat.completion",
+        "created": meta.created,
+        "model": meta.model,
         "choices": [{
+            "index": 0,
             "message": {
                 "role": "assistant",
                 "content": tokens.concat()
-            }
+            },
+            "finish_reason": "stop"
         }]
     }))
     .into_response()

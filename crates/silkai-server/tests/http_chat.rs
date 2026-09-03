@@ -299,3 +299,53 @@ async fn rejected_prompt_streaming_is_400_too() {
     let res = app.oneshot(chat("reject-stream", true)).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
+/// The fields the OpenAI SDKs and their imitators read.
+#[tokio::test]
+async fn completion_carries_openai_fields() {
+    let app = test_app().await;
+    let res = app.oneshot(chat("soap", false)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(v["id"].as_str().unwrap().starts_with("chatcmpl-"));
+    assert_eq!(v["object"], "chat.completion");
+    assert!(v["created"].as_u64().unwrap() > 1_700_000_000);
+    assert_eq!(v["model"], "soap");
+    assert_eq!(v["choices"][0]["index"], 0);
+    assert_eq!(v["choices"][0]["finish_reason"], "stop");
+    assert_eq!(v["choices"][0]["message"]["role"], "assistant");
+    assert_eq!(v["choices"][0]["message"]["content"], "hello world");
+}
+
+#[tokio::test]
+async fn stream_has_role_chunk_then_stop_then_done() {
+    let app = test_app().await;
+    let res = app.oneshot(chat("soap", true)).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let chunks: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter(|d| *d != "[DONE]")
+        .map(|d| serde_json::from_str(d).unwrap())
+        .collect();
+    assert!(chunks.len() >= 3, "{text}");
+    assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+    assert_eq!(chunks[0]["model"], "soap");
+    assert_eq!(chunks[0]["object"], "chat.completion.chunk");
+    let last = chunks.last().unwrap();
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+    assert!(last["choices"][0]["delta"].as_object().unwrap().is_empty());
+    let content: String = chunks[1..chunks.len() - 1]
+        .iter()
+        .map(|c| c["choices"][0]["delta"]["content"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(content, "hello world");
+    assert!(text.trim_end().ends_with("data: [DONE]"));
+    assert!(chunks.iter().all(|c| c["id"] == chunks[0]["id"]));
+}

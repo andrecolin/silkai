@@ -1,3 +1,9 @@
+//! Engines SilkAI can place on a card: a managed child process speaking
+//! OpenAI chat (llama-server, vLLM), HTTP adapters for vLLM and Ollama, an
+//! optional in-process llama.cpp behind `--features llama`, and a fake for
+//! tests. The [`Engine`] trait is what the runtime drives: warm, load, wake,
+//! sleep, discard, run.
+
 mod fake;
 mod llama;
 mod ollama;
