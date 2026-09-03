@@ -76,13 +76,26 @@ struct Inner {
     metrics: Metrics,
 }
 
+/// What survives a config reload: the event ring, the card sampler, and
+/// the engines of models whose config did not change.
+#[derive(Default)]
+pub(crate) struct Carried {
+    pub events: Option<Arc<EventLog>>,
+    pub sample: Option<sampler::Shared>,
+    pub engines: HashMap<String, Arc<dyn Engine>>,
+}
+
 impl Inner {
-    fn new(scheduler: Scheduler, cfg: &AppConfig, events: Arc<EventLog>) -> Self {
+    fn new(scheduler: Scheduler, cfg: &AppConfig, carried: Carried) -> Self {
         let (apply_tx, apply_rx) = mpsc::unbounded_channel();
+        let mut engines = engines_for(&cfg.enabled);
+        for (name, engine) in carried.engines {
+            engines.insert(name, engine);
+        }
         Self {
             snapshot: StdMutex::new(scheduler.status()),
             scheduler: Mutex::new(scheduler),
-            engines: engines_for(&cfg.enabled),
+            engines,
             paths: paths_for(&cfg.enabled),
             disabled: disabled_set(&cfg.disabled),
             unavailable: unavailable_set(&cfg.enabled),
@@ -102,8 +115,8 @@ impl Inner {
                 .map(|m| (m.spec.name.clone(), m.clone()))
                 .collect(),
             overlays: StdMutex::new(HashMap::new()),
-            sample: sampler::start(),
-            events,
+            sample: carried.sample.unwrap_or_else(sampler::start),
+            events: carried.events.unwrap_or_default(),
             metrics: Metrics::default(),
         }
     }
@@ -121,7 +134,57 @@ impl Runtime {
 
     /// Build on an existing event log, so a reload keeps the history.
     pub async fn with_events(cfg: AppConfig, events: Arc<EventLog>) -> Result<Self, RuntimeError> {
-        let (rt, warmup) = Self::assemble(cfg, events)?;
+        let carried = Carried {
+            events: Some(events),
+            ..Default::default()
+        };
+        Self::build(cfg, carried, Vec::new()).await
+    }
+
+    /// Replace `previous` with a runtime for `cfg`. Models whose config is
+    /// unchanged keep their engine and stay where they are (on the card or
+    /// the shelf); removed or changed models are discarded first, so their
+    /// memory is free before anything new loads. Call with no jobs running.
+    pub async fn rebuild(cfg: AppConfig, previous: &Runtime) -> Result<Self, RuntimeError> {
+        let status = previous.status();
+        let mut carried = Carried {
+            events: Some(previous.events()),
+            sample: Some(Arc::clone(&previous.inner.sample)),
+            engines: HashMap::new(),
+        };
+        let mut adopt = Vec::new();
+        for model in &cfg.enabled {
+            let name = &model.spec.name;
+            let unchanged = previous.inner.models.get(name) == Some(model);
+            let Some(engine) = previous.inner.engines.get(name).filter(|_| unchanged) else {
+                continue;
+            };
+            let Some(st) = status.models.iter().find(|m| &m.name == name) else {
+                continue;
+            };
+            carried.engines.insert(name.clone(), Arc::clone(engine));
+            adopt.push((
+                name.clone(),
+                st.tier,
+                st.gpu.into_iter().collect::<Vec<_>>(),
+            ));
+        }
+        for (name, engine) in &previous.inner.engines {
+            if carried.engines.contains_key(name) {
+                continue;
+            }
+            previous.emit(Draft::new("discard").model(name.clone()));
+            let _ = engine.discard().await;
+        }
+        Self::build(cfg, carried, adopt).await
+    }
+
+    async fn build(
+        cfg: AppConfig,
+        carried: Carried,
+        adopt: Vec<(String, silkai_sched::Tier, Vec<u32>)>,
+    ) -> Result<Self, RuntimeError> {
+        let (rt, warmup) = Self::assemble(cfg, carried, adopt)?;
         rt.spawn_applier().await;
         rt.apply_all(warmup).await?;
         Ok(rt)
@@ -356,7 +419,8 @@ impl Runtime {
 impl Runtime {
     fn assemble(
         cfg: AppConfig,
-        events: Arc<EventLog>,
+        carried: Carried,
+        adopt: Vec<(String, silkai_sched::Tier, Vec<u32>)>,
     ) -> Result<(Self, Vec<Action>), RuntimeError> {
         let specs = cfg
             .enabled
@@ -365,9 +429,12 @@ impl Runtime {
             .map(|m| m.spec.clone())
             .collect();
         let mut scheduler = Scheduler::new(cfg.resources.clone(), specs).map_err(sched_err)?;
+        for (name, tier, gpus) in adopt {
+            scheduler.adopt(&name, tier, gpus);
+        }
         let warmup = prefetch_actions(&mut scheduler, cfg.prefetch_on_start);
         let rt = Self {
-            inner: Arc::new(Inner::new(scheduler, &cfg, events)),
+            inner: Arc::new(Inner::new(scheduler, &cfg, carried)),
         };
         Ok((rt, warmup))
     }

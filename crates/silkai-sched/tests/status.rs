@@ -69,3 +69,25 @@ fn status_lists_used_per_gpu() {
     assert_eq!(g1.schedulable_gb, 29.0);
     assert_eq!(snap.gpu_used_gb, 36.0);
 }
+
+#[test]
+fn adopt_seeds_residency_and_prefetch_skips_it() {
+    let mut s = Scheduler::new(clinic_resources(), clinic_models()).unwrap();
+    s.adopt("soap", Tier::Bench, vec![0]);
+    s.adopt("whisper", Tier::Shelf, vec![]);
+    s.adopt("nobody", Tier::Bench, vec![0]);
+    assert_eq!(s.tier("soap"), Tier::Bench);
+    assert_eq!(s.gpu_of("soap"), Some(0));
+    assert_eq!(s.tier("whisper"), Tier::Shelf);
+    assert_eq!(s.gpu_used_gb(), 28.0);
+    let warmed: Vec<String> = s
+        .prefetch()
+        .into_iter()
+        .filter_map(|a| match a {
+            silkai_sched::Action::Warm { model } => Some(model),
+            _ => None,
+        })
+        .collect();
+    // chart-scan is still in the cupboard; the adopted two are not re-warmed.
+    assert_eq!(warmed, vec!["chart-scan".to_string()]);
+}
