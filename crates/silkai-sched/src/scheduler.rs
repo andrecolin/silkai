@@ -74,6 +74,27 @@ impl Scheduler {
         actions
     }
 
+    /// Record where a model already is, for a scheduler built over models
+    /// that a previous scheduler left resident (a config reload). A model
+    /// this scheduler does not know is ignored. Bench models need their
+    /// cards; `prefetch` then leaves adopted models alone.
+    pub fn adopt(&mut self, model: &str, tier: Tier, gpus: Vec<u32>) {
+        if !self.models.contains_key(model) {
+            return;
+        }
+        self.on_gpu.remove(model);
+        self.idle_since.remove(model);
+        match tier {
+            Tier::Bench => {
+                self.on_gpu.insert(model.to_string(), gpus);
+                self.stamp_idle(model);
+            }
+            Tier::Shelf => self.stamp_idle(model),
+            Tier::Cupboard => {}
+        }
+        self.tiers.insert(model.to_string(), tier);
+    }
+
     pub fn tier(&self, model: &str) -> Tier {
         self.tiers.get(model).copied().unwrap_or(Tier::Cupboard)
     }

@@ -286,6 +286,10 @@ enabled = true
 token = "change-me"   # optional; guards /ui, /metrics and /admin/*
 ```
 
+`POST /admin/reload` re-reads the config while no job is running. Models
+whose block did not change stay where they are, on the card or the shelf;
+removed or changed ones are discarded first, then anything new loads.
+
 The token is sent as `Authorization: Bearer <token>` by tools, or typed as
 the password when the browser asks (any user name). `/v1/*` never needs it.
 The daemon still binds to loopback only; to reach the page from another

@@ -307,7 +307,7 @@ async fn swap_if_idle(state: &AppState, cfg: AppConfig) -> StatusCode {
         return StatusCode::CONFLICT;
     }
     state.events.emit(Draft::new("reload"));
-    match Runtime::with_events(cfg, Arc::clone(&state.events)).await {
+    match Runtime::rebuild(cfg, &slot).await {
         Ok(rt) => {
             *slot = Arc::new(rt);
             StatusCode::OK
