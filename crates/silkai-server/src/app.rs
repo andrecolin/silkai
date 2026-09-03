@@ -2,24 +2,30 @@ use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::sse::{Event, Sse};
+use axum::extract::{Query, State};
+use axum::http::{header, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures_util::stream::unfold;
+use futures_util::stream::{self, unfold};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use silkai_adapters::ChatMessage;
-use silkai_sched::{JobId, StatusSnapshot};
+use silkai_sched::JobId;
 use tokio::sync::mpsc;
 
-use crate::config::{load_from_path, AppConfig, ConfigError};
+use crate::config::{load_from_path, AppConfig, ConfigError, UiConfig};
+use crate::events::{self, Draft, EventLog};
 use crate::runtime::{Runtime, RuntimeError};
 
 pub(crate) struct AppState {
     pub(crate) config_path: Option<PathBuf>,
     pub(crate) runtime: tokio::sync::RwLock<Arc<Runtime>>,
+    /// Shared across reloads so the history survives a config change.
+    pub(crate) events: Arc<EventLog>,
+    /// Fixed at startup; changing `[ui]` needs a restart.
+    pub(crate) ui: UiConfig,
 }
 
 pub async fn app_from_config(cfg: AppConfig) -> Router {
@@ -33,7 +39,8 @@ pub async fn app_from_path(path: impl AsRef<Path>) -> Result<Router, ConfigError
 }
 
 pub async fn app_from_config_path(cfg: AppConfig, config_path: Option<PathBuf>) -> Router {
-    router(config_path, build_runtime(cfg).await)
+    let ui = cfg.ui.clone();
+    router(config_path, build_runtime(cfg).await, ui)
 }
 
 #[cfg(feature = "test-util")]
@@ -66,6 +73,17 @@ pub async fn test_app_timeout_ms(ms: u64) -> Router {
     app_from_config(cfg).await
 }
 
+/// The clinic app with the status page on or off and an optional token.
+#[cfg(feature = "test-util")]
+pub async fn test_app_ui(enabled: bool, token: Option<&str>) -> Router {
+    let mut cfg = clinic_cfg();
+    cfg.ui = UiConfig {
+        enabled,
+        token: token.map(str::to_string),
+    };
+    app_from_config(cfg).await
+}
+
 #[cfg(feature = "test-util")]
 pub async fn test_app_llama_soap() -> Router {
     app_from_config(llama_soap_cfg()).await
@@ -86,22 +104,105 @@ async fn build_runtime(cfg: AppConfig) -> Runtime {
     Runtime::new(cfg).await.expect("runtime")
 }
 
-fn router(config_path: Option<PathBuf>, rt: Runtime) -> Router {
-    Router::new()
+fn router(config_path: Option<PathBuf>, rt: Runtime, ui: UiConfig) -> Router {
+    let state = state_for(config_path, rt, ui);
+    let open = Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(list_models))
         .route("/v1/status", get(status))
+        .route("/v1/events", get(events_stream))
         .route("/v1/chat/completions", post(chat_completions))
-        .route("/v1/session", get(crate::ws::session))
+        .route("/v1/session", get(crate::ws::session));
+    let guarded = Router::new()
+        .route("/ui", get(ui_page))
+        .route("/metrics", get(metrics))
         .route("/admin/reload", post(reload))
-        .with_state(state_for(config_path, rt))
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            crate::auth::require_token,
+        ));
+    open.merge(guarded).with_state(state)
 }
 
-fn state_for(config_path: Option<PathBuf>, rt: Runtime) -> Arc<AppState> {
+fn state_for(config_path: Option<PathBuf>, rt: Runtime, ui: UiConfig) -> Arc<AppState> {
     Arc::new(AppState {
         config_path,
+        events: rt.events(),
         runtime: tokio::sync::RwLock::new(Arc::new(rt)),
+        ui,
     })
+}
+
+const UI_PAGE: &str = include_str!("../ui/index.html");
+
+async fn ui_page(State(state): State<Arc<AppState>>) -> Response {
+    if !state.ui.enabled {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        UI_PAGE,
+    )
+        .into_response()
+}
+
+async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let rt = runtime_of(&state).await;
+    let body = crate::metrics::render(&rt.status(), &rt.counters());
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+}
+
+#[derive(Deserialize)]
+struct EventsQuery {
+    #[serde(default)]
+    after: u64,
+}
+
+/// Replay the ring after `?after=<seq>`, then follow live. Subscribing
+/// before reading the ring means nothing is lost in between; anything that
+/// lands in both is dropped from the live side by sequence number.
+async fn events_stream(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<EventsQuery>,
+) -> impl IntoResponse {
+    let log = Arc::clone(&state.events);
+    let rx = log.subscribe();
+    let replay = log.since(q.after);
+    let last = replay.last().map(|e| e.seq).unwrap_or(q.after);
+    let live = unfold((rx, last), |(mut rx, last)| async move {
+        loop {
+            match rx.recv().await {
+                Ok(e) if e.seq <= last => continue,
+                Ok(e) => {
+                    let seq = e.seq;
+                    return Some((sse_event(&e), (rx, seq)));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    return Some((Event::default().data(r#"{"kind":"lagged"}"#), (rx, last)));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    let stream = stream::iter(replay.iter().map(sse_event).collect::<Vec<_>>())
+        .chain(live)
+        .map(Ok::<_, Infallible>);
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn sse_event(e: &events::Event) -> Event {
+    Event::default()
+        .id(e.seq.to_string())
+        .data(serde_json::to_string(e).unwrap_or_default())
 }
 
 async fn health() -> &'static str {
@@ -117,7 +218,7 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelList> {
     Json(ModelList::from_names(rt.configured_models()))
 }
 
-async fn status(State(state): State<Arc<AppState>>) -> Json<StatusSnapshot> {
+async fn status(State(state): State<Arc<AppState>>) -> Json<crate::status::Status> {
     Json(runtime_of(&state).await.status())
 }
 
@@ -191,7 +292,8 @@ async fn swap_if_idle(state: &AppState, cfg: AppConfig) -> StatusCode {
     if running_jobs(&slot) > 0 {
         return StatusCode::CONFLICT;
     }
-    match Runtime::new(cfg).await {
+    state.events.emit(Draft::new("reload"));
+    match Runtime::with_events(cfg, Arc::clone(&state.events)).await {
         Ok(rt) => {
             *slot = Arc::new(rt);
             StatusCode::OK
@@ -397,6 +499,7 @@ fn clinic_cfg() -> AppConfig {
         resources: clinic_resources(),
         enabled: clinic_models().into_iter().map(fake_model).collect(),
         disabled: vec![],
+        ui: Default::default(),
     }
 }
 

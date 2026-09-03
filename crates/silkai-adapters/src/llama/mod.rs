@@ -88,6 +88,13 @@ impl Engine for LlamaEngine {
     fn measured_vram_gb(&self) -> f64 {
         self.vram_gb
     }
+
+    // No `has_shelf`: sleep re-reads the GGUF with zero GPU layers, which
+    // mmaps it. The page cache does the caching, not this engine.
+
+    fn pid(&self) -> Option<u32> {
+        self.lock().on_bench.then(std::process::id)
+    }
 }
 
 #[cfg(feature = "llama")]

@@ -43,6 +43,7 @@ fn gguf_cfg() -> silkai_server::config::AppConfig {
         resources: resources_for(vram_a, vram_b),
         enabled: vec![model_a(vram_a), model_b(vram_b)],
         disabled: vec![],
+        ui: Default::default(),
     }
 }
 
@@ -127,7 +128,10 @@ fn assert_pack_or_exclusive(st: &silkai_sched::StatusSnapshot) {
 }
 
 #[cfg(feature = "llama")]
-fn named<'a>(st: &'a silkai_sched::StatusSnapshot, name: &str) -> &'a silkai_sched::ModelStatus {
+fn named<'a>(
+    st: &'a silkai_server::status::Status,
+    name: &str,
+) -> &'a silkai_server::status::ModelStatus {
     st.models
         .iter()
         .find(|m| m.name == name)

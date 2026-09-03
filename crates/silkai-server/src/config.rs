@@ -14,6 +14,16 @@ pub struct AppConfig {
     pub resources: Resources,
     pub enabled: Vec<ConfiguredModel>,
     pub disabled: Vec<ConfiguredModel>,
+    pub ui: UiConfig,
+}
+
+/// The optional status page. Off by default; servers do not need it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UiConfig {
+    pub enabled: bool,
+    /// When set, `/ui`, `/metrics`, and `/admin/*` require
+    /// `Authorization: Bearer <token>`.
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +54,16 @@ struct FileConfig {
     resources: FileResources,
     #[serde(default)]
     models: HashMap<String, FileModel>,
+    #[serde(default)]
+    ui: FileUi,
+}
+
+#[derive(Default, Deserialize)]
+struct FileUi {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -136,6 +156,10 @@ fn app_config(
         resources,
         enabled,
         disabled,
+        ui: UiConfig {
+            enabled: file.ui.enabled,
+            token: file.ui.token.filter(|t| !t.is_empty()),
+        },
     })
 }
 

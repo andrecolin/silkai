@@ -47,6 +47,7 @@ fn crashy_http_cfg() -> AppConfig {
             },
         }],
         disabled: vec![],
+        ui: Default::default(),
     }
 }
 

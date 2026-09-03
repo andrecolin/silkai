@@ -22,6 +22,7 @@ fn clinic_cfg() -> AppConfig {
             })
             .collect(),
         disabled: vec![],
+        ui: Default::default(),
     }
 }
 

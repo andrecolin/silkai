@@ -200,4 +200,8 @@ impl Engine for ProcessEngine {
     fn measured_vram_gb(&self) -> f64 {
         self.http.measured_vram_gb()
     }
+
+    fn pid(&self) -> Option<u32> {
+        self.child_id()
+    }
 }
