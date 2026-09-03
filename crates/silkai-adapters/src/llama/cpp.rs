@@ -5,14 +5,14 @@ use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::Inner;
-use crate::EngineError;
+use crate::{last_content, ChatMessage, EngineError};
 
 const GPU_SHELF: u32 = 0;
 const GPU_BENCH: u32 = 1000;
@@ -32,7 +32,7 @@ pub async fn place(
 
 pub fn start_run(
     inner: Arc<Mutex<Inner>>,
-    prompt: String,
+    messages: Vec<ChatMessage>,
     prefix: String,
     cancel: CancellationToken,
 ) -> Result<mpsc::Receiver<String>, EngineError> {
@@ -41,14 +41,29 @@ pub fn start_run(
     }
     let (tx, rx) = mpsc::channel(16);
     tokio::task::spawn_blocking(move || {
-        let input = if prefix.is_empty() {
-            prompt
-        } else {
-            format!("{prompt}{prefix}")
-        };
-        let _ = generate(&inner, &input, tx, cancel);
+        let _ = generate(&inner, &messages, &prefix, tx, cancel);
     });
     Ok(rx)
+}
+
+/// Render the chat through the GGUF's own template (so instruct models see
+/// their system/user/assistant markers), then append any already-streamed
+/// prefix so a resumed run continues the same answer. A model without a
+/// template gets the last message as plain text.
+fn render_prompt(model: &LlamaModel, messages: &[ChatMessage], prefix: &str) -> String {
+    let rendered =
+        apply_template(model, messages).unwrap_or_else(|| last_content(messages).to_string());
+    format!("{rendered}{prefix}")
+}
+
+fn apply_template(model: &LlamaModel, messages: &[ChatMessage]) -> Option<String> {
+    let template = model.chat_template(None).ok()?;
+    let chat: Vec<LlamaChatMessage> = messages
+        .iter()
+        .map(|m| LlamaChatMessage::new(m.role.clone(), m.content.clone()))
+        .collect::<Result<_, _>>()
+        .ok()?;
+    model.apply_chat_template(&template, &chat, true).ok()
 }
 
 fn place_sync(
@@ -79,16 +94,18 @@ fn load_model(path: &str, layers: u32, gpu: u32) -> Result<LlamaModel, EngineErr
 
 fn generate(
     inner: &Mutex<Inner>,
-    prompt: &str,
+    messages: &[ChatMessage],
+    prefix: &str,
     tx: mpsc::Sender<String>,
     cancel: CancellationToken,
 ) -> Result<(), EngineError> {
     let g = inner.lock().expect("llama engine mutex");
     let model = g.model.as_ref().ok_or(EngineError::NotLoaded)?;
+    let prompt = render_prompt(model, messages, prefix);
     let mut ctx = model
         .new_context(backend()?, LlamaContextParams::default())
         .map_err(other)?;
-    infer(model, &mut ctx, prompt, tx, cancel)
+    infer(model, &mut ctx, &prompt, tx, cancel)
 }
 
 fn infer(
@@ -98,7 +115,8 @@ fn infer(
     tx: mpsc::Sender<String>,
     cancel: CancellationToken,
 ) -> Result<(), EngineError> {
-    let tokens = model.str_to_token(prompt, AddBos::Always).map_err(other)?;
+    // Templates emit their own BOS marker; adding another confuses most models.
+    let tokens = model.str_to_token(prompt, AddBos::Never).map_err(other)?;
     if tokens.is_empty() {
         return Err(EngineError::Other("empty prompt tokens".into()));
     }

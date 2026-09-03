@@ -16,8 +16,14 @@ async fn run_two_ggufs() {
     let rt = silkai_server::Runtime::new(gguf_cfg())
         .await
         .expect("runtime");
-    let (job_a, mut rx_a) = rt.submit_chat("a", "hi").await.expect("submit a");
-    let (job_b, mut rx_b) = rt.submit_chat("b", "hi").await.expect("submit b");
+    let (job_a, mut rx_a) = rt
+        .submit_chat("a", vec![silkai_adapters::ChatMessage::user("hi")])
+        .await
+        .expect("submit a");
+    let (job_b, mut rx_b) = rt
+        .submit_chat("b", vec![silkai_adapters::ChatMessage::user("hi")])
+        .await
+        .expect("submit b");
     assert_pack_or_exclusive(&rt.status());
     let _ = tokio::join!(recv_some(&mut rx_a), recv_some(&mut rx_b));
     assert_pack_or_exclusive(&rt.status());

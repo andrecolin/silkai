@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use silkai_adapters::{Engine, ProcessEngine};
+use silkai_adapters::{ChatMessage, Engine, ProcessEngine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -25,7 +25,10 @@ async fn process_run_streams_after_spawn() {
     let (url, _) = spawn_mock(false).await;
     let e = ProcessEngine::new("write", 28.0, &url, sleep_cmd());
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
-    let mut rx = e.run("hello", "", CancellationToken::new()).await.unwrap();
+    let mut rx = e
+        .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
+        .await
+        .unwrap();
     let mut got = Vec::new();
     while let Some(t) = rx.recv().await {
         got.push(t);

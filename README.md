@@ -152,6 +152,11 @@ curl -s http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"write","messages":[{"role":"user","content":"Summarize this meeting."}]}'
 ```
 
+The whole `messages` list reaches the engine: system prompts, history,
+and assistant turns are forwarded as sent (llama-server, vLLM, and Ollama
+apply the model's chat template; the in-process llama.cpp engine applies
+the GGUF's own template). `content` may be a string or a list of text parts.
+
 Streaming: `"stream": true` (SSE). Also `GET /v1/models` and `GET /v1/status`
 (models plus per-GPU `used_gb` / `schedulable_gb`). The daemon logs load, wake,
 sleep, discard, and preempt. If an engine load or run fails, that job is 500,

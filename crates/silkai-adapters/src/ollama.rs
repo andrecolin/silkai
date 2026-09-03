@@ -5,7 +5,8 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Engine, EngineError};
+use crate::vllm::with_prefix;
+use crate::{ChatMessage, Engine, EngineError};
 
 struct Inner {
     on_bench: bool,
@@ -114,7 +115,7 @@ impl Engine for OllamaEngine {
 
     async fn run(
         &self,
-        prompt: &str,
+        messages: &[ChatMessage],
         prefix: &str,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError> {
@@ -128,10 +129,9 @@ impl Engine for OllamaEngine {
         }
         let client = self.client.clone();
         let url = format!("{}/api/chat", self.url);
-        let prompt = prompt.to_string();
-        let prefix = prefix.to_string();
+        let messages = with_prefix(messages, prefix);
         tokio::spawn(async move {
-            stream_chat(client, url, model, prompt, prefix, tx, cancel).await;
+            stream_chat(client, url, model, messages, tx, cancel).await;
         });
         Ok(rx)
     }
@@ -145,15 +145,10 @@ async fn stream_chat(
     client: reqwest::Client,
     url: String,
     model: String,
-    prompt: String,
-    prefix: String,
+    messages: Vec<ChatMessage>,
     tx: mpsc::Sender<String>,
     cancel: CancellationToken,
 ) {
-    let mut messages = vec![serde_json::json!({"role": "user", "content": prompt})];
-    if !prefix.is_empty() {
-        messages.push(serde_json::json!({"role": "assistant", "content": prefix}));
-    }
     let body = serde_json::json!({
         "model": model,
         "messages": messages,
@@ -225,13 +220,13 @@ fn http_err(err: reqwest::Error) -> EngineError {
 #[derive(Deserialize)]
 struct ChatLine {
     #[serde(default)]
-    message: Option<ChatMessage>,
+    message: Option<LineMessage>,
     #[serde(default)]
     done: bool,
 }
 
 #[derive(Deserialize)]
-struct ChatMessage {
+struct LineMessage {
     content: Option<String>,
 }
 

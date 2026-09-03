@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::vllm::VllmEngine;
-use crate::{Engine, EngineError};
+use crate::{ChatMessage, Engine, EngineError};
 
 const READY_POLL: Duration = Duration::from_millis(100);
 /// A 20-plus GB GGUF read from disk and pushed to the card can take a few
@@ -190,11 +190,11 @@ impl Engine for ProcessEngine {
 
     async fn run(
         &self,
-        prompt: &str,
+        messages: &[ChatMessage],
         prefix: &str,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError> {
-        self.http.run(prompt, prefix, cancel).await
+        self.http.run(messages, prefix, cancel).await
     }
 
     fn measured_vram_gb(&self) -> f64 {
