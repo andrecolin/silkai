@@ -1,5 +1,8 @@
 # SilkAI
 
+[![CI](https://github.com/andrecolin/silkai/actions/workflows/ci.yml/badge.svg)](https://github.com/andrecolin/silkai/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 On a server with a 32 GB GPU and 128 GB of RAM, you have three different
 models that can stay in RAM all day. The GPU only holds whoever is working
 right now. A little VRAM is left over for normal machine functions.
@@ -216,8 +219,10 @@ SILKAI_ITEST=1 SILKAI_GGUF_A=/path/tiny.gguf SILKAI_GGUF_B=/path/small.gguf \
   cargo test -p silkai-server --features llama --test itest_llama -- --nocapture
 ```
 
-PRs welcome; no CLA. Keep CUDA (and other GPU SDK types) out of `silkai-sched`.
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+PRs welcome; no CLA. `main` is protected — changes land through a pull
+request with green CI. Keep CUDA (and other GPU SDK types) out of
+`silkai-sched`. See [CONTRIBUTING.md](CONTRIBUTING.md),
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), and [SECURITY.md](SECURITY.md).
 
 ## License and coffee
 

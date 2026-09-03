@@ -37,7 +37,7 @@ fn third_whisper_queues_at_two_slots() {
     s.submit("whisper");
     s.submit("whisper");
     let c = s.submit("whisper");
-    assert!(started(&c) == false);
+    assert!(!started(&c));
     assert_eq!(s.queued("whisper"), 1);
     assert_eq!(s.running("whisper"), 2);
 }

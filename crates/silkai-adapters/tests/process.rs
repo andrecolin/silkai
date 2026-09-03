@@ -100,7 +100,8 @@ async fn process_sleep_kills_process_group() {
     );
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
     let pid = e.child_id().expect("child pid");
-    let members = pids_in_group(pid);
+    // `sh` forks `sleep` after load() returns, so wait for the group to fill.
+    let members = await_group(pid, 2).await;
     assert!(
         members.len() >= 2,
         "expected sh and sleep in group, got {members:?}"
@@ -135,6 +136,19 @@ fn serve_mock(listener: TcpListener, fail_wake: bool, log: Arc<Mutex<Vec<String>
             });
         }
     });
+}
+
+#[cfg(unix)]
+async fn await_group(pgid: u32, want: usize) -> Vec<u32> {
+    let mut members = pids_in_group(pgid);
+    for _ in 0..100 {
+        if members.len() >= want {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        members = pids_in_group(pgid);
+    }
+    members
 }
 
 #[cfg(unix)]

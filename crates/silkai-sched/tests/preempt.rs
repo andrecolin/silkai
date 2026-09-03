@@ -60,11 +60,7 @@ fn soap_does_not_preempt_live_whisper() {
 fn background_does_not_preempt_live() {
     // Two whisper jobs still cost 12 GB (slots share one copy). On 21 GB,
     // chart-scan 10 does not fit and must queue rather than preempt live.
-    let mut s = Scheduler::new(
-        Resources::single(21.0, 96.0),
-        clinic_models(),
-    )
-    .unwrap();
+    let mut s = Scheduler::new(Resources::single(21.0, 96.0), clinic_models()).unwrap();
     s.submit("whisper");
     s.submit("whisper");
     let r = s.submit("chart-scan");
