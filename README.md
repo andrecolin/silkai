@@ -18,9 +18,10 @@ fails to load or never starts. SilkAI is the one process that owns the card:
 it loads the model a request names, packs together the ones that fit, parks
 the idle ones, and brings them back when they are asked for.
 
-Apps talk to it over OpenAI-style HTTP. The rules, who may share the card,
-who must have it alone, and who is live, sit in one config file rather than
-in every request.
+Apps talk to it over OpenAI-style HTTP, or open a session socket to pin a
+model on the card while they talk to that engine directly. The rules, who may
+share the card, who must have it alone, and who is live, sit in one config
+file rather than in every request.
 
 [MIT](LICENSE) · [Ko-fi](https://ko-fi.com/andrecolin)
 
