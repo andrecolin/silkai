@@ -87,35 +87,47 @@ disk.
 - **Policy in config.** Clients only send `"model"`. A random script cannot
   steal the GPU from something live.
 
-## Status
+## What is in 0.5
 
-Slice 1 is a working **Linux** daemon (`127.0.0.1` only): scheduler, HTTP chat
-completions, fake engines (no GPU required), optional llama.cpp behind
-`--features llama` (optional `cuda` / `vulkan` / `metal`), and HTTP adapters
-for vLLM (`engine = "vllm"`) and Ollama (`engine = "ollama"`).
+A **Linux** daemon on `127.0.0.1` with:
 
-WebSocket is a **per-model** option (`transport = "websocket"` or `"both"`).
-Any configured model can take a session. An open socket holds that model’s
-slot until it closes or goes idle. Speech-in, notes-out, SOAP, search — that
-routing stays in your frontend.
+- **Engines.** `process` (SilkAI starts and stops a child that speaks OpenAI
+  chat: llama-server, vLLM, and the like; the recommended path), HTTP
+  adapters for a vLLM or Ollama you run yourself, an in-process llama.cpp
+  behind `--features llama` (experimental, see below), and `fake` for tests.
+- **OpenAI-shaped HTTP.** `POST /v1/chat/completions` with the whole
+  `messages` list, `max_tokens`, `temperature`, and streaming; `GET
+  /v1/models`. Works with the official SDKs.
+- **WebSocket per model** (`transport = "websocket"` or `"both"`). An open
+  socket holds that model's slot until it closes or goes idle. Speech-in,
+  notes-out, search: that routing stays in your frontend.
+- **Observability.** `GET /v1/status` with a loading state and measured
+  VRAM, `GET /v1/events` over SSE, `GET /metrics` for Prometheus, and an
+  optional embedded status page at `/ui`.
+- **Tools.** `silkai init` writes a config for your machine; `silkai check`
+  verifies it before anything touches the card; `POST /admin/reload` keeps
+  unchanged models resident.
 
-Still to come: more adapters. The scheduler and HTTP API are meant to stay
-portable (x86_64 and ARM; CUDA / Vulkan / Metal via the engine, not the core).
+The scheduler and HTTP API stay portable (x86_64 and ARM; CUDA, Vulkan, and
+Metal live in the engine, not the core). macOS runs the tests; the GPU paths
+are Linux-tested. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Install
 
 Needs Rust 1.80+ ([rustup](https://rustup.rs)). Fake engines need no GPU.
 
 ```bash
+cargo install silkai --locked
+silkai init && silkai check
+```
+
+To run it as a service, the install script does the same from a checkout
+and adds a **user** systemd unit on Linux:
+
+```bash
 git clone https://github.com/andrecolin/silkai
 cd silkai
 ./scripts/install.sh
-```
-
-That puts `silkai` in `~/.local/bin`, writes `~/.config/silkai/config.toml` if
-missing, and installs a **user** systemd unit on Linux:
-
-```bash
 systemctl --user enable --now silkai
 curl -s http://127.0.0.1:8080/health
 ```
@@ -142,11 +154,9 @@ A toolkit under `/usr/local/cuda` is found on its own. If you already have a
 llama.cpp build, `engine = "process"` with `llama-server` (below) skips all
 of this.
 
-Without the script (from crates.io once 0.1.0 is published, or from a
-checkout):
+From a checkout without the script:
 
 ```bash
-cargo install silkai --locked
 cargo install --path crates/silkai --locked
 # optional: --features llama
 # GPU: --features llama,cuda | llama,vulkan | llama,metal
