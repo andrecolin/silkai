@@ -120,14 +120,20 @@ impl ProcessEngine {
     }
 }
 
+/// SIGKILL the child's whole process group, so an engine that forks workers
+/// (vLLM does) does not leave them behind holding VRAM.
+///
+/// `spawn` gives the child its own group with `process_group(0)`, so the
+/// child's pid is the group id. This calls `killpg(2)` directly rather than
+/// shelling out to a `kill` binary: the BSD and util-linux front ends do not
+/// agree on how to spell a negative pid, and the failure was silent.
 #[cfg(unix)]
 fn kill_group(pid: u32) {
-    let _ = std::process::Command::new("kill")
-        .args(["-KILL", &format!("-{pid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    // Safety: `killpg` takes a group id and a signal, touches no memory, and
+    // only fails with ESRCH/EPERM, which we cannot act on here.
+    unsafe {
+        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+    }
 }
 
 #[cfg(not(unix))]
