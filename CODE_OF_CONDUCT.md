@@ -22,7 +22,7 @@ anything else.
 
 ## Enforcement
 
-Report a problem to the maintainer at <andrecolin@outlook.com>. Reports stay
+Report a problem to the maintainer at <admin@boneyard.io>. Reports stay
 private. The maintainer may edit, hide, or delete comments, close issues and
 pull requests, or block accounts, and does not owe a public explanation for
 doing so.
