@@ -70,8 +70,15 @@ cargo publish --workspace
 
 If you dry-run, change code, and dry-run again at the same version, the
 verify step can compile the *old* copy of a sibling crate: cargo treats
-registry sources as immutable and reuses the earlier build. `cargo clean`
-first, then dry-run again.
+registry sources as immutable, keeps the copy it extracted the first time
+under `~/.cargo/registry/src/*/silkai-*`, and reuses the earlier build.
+Clear both, in this order, then dry-run again:
+
+```bash
+rm -rf ~/.cargo/registry/src/*/silkai-* target/package
+cargo clean
+cargo publish --workspace --dry-run
+```
 
 Every crate inherits its metadata from `[workspace.package]`, and the
 inter-crate dependencies are declared once under `[workspace.dependencies]`
