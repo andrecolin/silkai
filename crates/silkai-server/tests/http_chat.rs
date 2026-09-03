@@ -21,6 +21,14 @@ fn chat(model: &str, stream: bool) -> Request<Body> {
 }
 
 fn crashy_http_cfg() -> AppConfig {
+    one_fake_cfg("crashy-http")
+}
+
+/// An app with a single fake model under a name no other test uses. The
+/// fake engine's fail/reject hooks are global and keyed by model name, and
+/// tests in one binary run in parallel, so a shared name lets one test
+/// consume another's hook.
+fn one_fake_cfg(name: &str) -> AppConfig {
     AppConfig {
         listen: "127.0.0.1:0".into(),
         prefetch_on_start: false,
@@ -29,14 +37,14 @@ fn crashy_http_cfg() -> AppConfig {
         resources: Resources::single(29.0, 96.0),
         enabled: vec![ConfiguredModel {
             engine: "fake".into(),
-            path: "/models/crashy-http.bin".into(),
+            path: format!("/models/{name}.bin"),
             url: None,
             cmd: Vec::new(),
             transport: "http".into(),
             idle_timeout_secs: None,
             ctx_size: None,
             spec: ModelSpec {
-                name: "crashy-http".into(),
+                name: name.into(),
                 vram_gb: 8.0,
                 ram_gb: 8.0,
                 priority: Priority::Normal,
@@ -236,13 +244,21 @@ async fn timeout_does_not_leave_soap_queued() {
 /// with the reason, and the model is still resident for the next one.
 #[tokio::test]
 async fn rejected_prompt_is_400_and_model_stays_up() {
-    let app = test_app().await;
-    let warm = app.clone().oneshot(chat("soap", false)).await.unwrap();
+    let app = silkai_server::app::app_from_config(one_fake_cfg("reject-json")).await;
+    let warm = app
+        .clone()
+        .oneshot(chat("reject-json", false))
+        .await
+        .unwrap();
     assert_eq!(warm.status(), StatusCode::OK);
     let _ = axum::body::to_bytes(warm.into_body(), usize::MAX).await;
 
-    FakeEngine::reject_next_run("soap");
-    let res = app.clone().oneshot(chat("soap", false)).await.unwrap();
+    FakeEngine::reject_next_run("reject-json");
+    let res = app
+        .clone()
+        .oneshot(chat("reject-json", false))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(res.into_body(), usize::MAX)
         .await
@@ -263,23 +279,23 @@ async fn rejected_prompt_is_400_and_model_stays_up() {
         .await
         .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let soap = v["models"]
+    let model = v["models"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|m| m["name"] == "soap")
+        .find(|m| m["name"] == "reject-json")
         .unwrap();
-    assert_eq!(soap["state"], "bench", "{soap}");
-    assert_eq!(soap["running"], 0);
+    assert_eq!(model["state"], "bench", "{model}");
+    assert_eq!(model["running"], 0);
 
-    let again = app.oneshot(chat("soap", false)).await.unwrap();
+    let again = app.oneshot(chat("reject-json", false)).await.unwrap();
     assert_eq!(again.status(), StatusCode::OK);
 }
 
 #[tokio::test]
 async fn rejected_prompt_streaming_is_400_too() {
-    let app = test_app().await;
-    FakeEngine::reject_next_run("soap");
-    let res = app.oneshot(chat("soap", true)).await.unwrap();
+    let app = silkai_server::app::app_from_config(one_fake_cfg("reject-stream")).await;
+    FakeEngine::reject_next_run("reject-stream");
+    let res = app.oneshot(chat("reject-stream", true)).await.unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
