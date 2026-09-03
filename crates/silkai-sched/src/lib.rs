@@ -1,5 +1,6 @@
 //! GPU capacity scheduler. No GPU types — only GB numbers.
 
+#[cfg(feature = "test-util")]
 pub mod clinic;
 pub mod scheduler;
 pub mod types;

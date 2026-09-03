@@ -119,9 +119,11 @@ A toolkit under `/usr/local/cuda` is found on its own. If you already have a
 llama.cpp build, `engine = "process"` with `llama-server` (below) skips all
 of this.
 
-Without the script:
+Without the script (from crates.io once 0.1.0 is published, or from a
+checkout):
 
 ```bash
+cargo install silkai --locked
 cargo install --path crates/silkai --locked
 # optional: --features llama
 # GPU: --features llama,cuda | llama,vulkan | llama,metal

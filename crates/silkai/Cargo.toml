@@ -1,8 +1,14 @@
 [package]
 name = "silkai"
+description = "Local GPU scheduler daemon: run several LLMs on one card, pack what fits, park the rest warm in RAM"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = []
@@ -13,6 +19,6 @@ metal = ["llama", "silkai-server/metal"]
 
 [dependencies]
 anyhow = "1"
-silkai-server = { path = "../silkai-server" }
+silkai-server.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-subscriber = "0.3"
