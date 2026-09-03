@@ -4,7 +4,11 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
-use silkai_adapters::FakeEngine;
+use silkai_adapters::{ChatMessage, FakeEngine};
+
+fn user(text: &str) -> Vec<ChatMessage> {
+    vec![ChatMessage::user(text)]
+}
 use silkai_sched::clinic::{clinic_models, clinic_resources};
 use silkai_sched::{ModelSpec, Priority, Resources, Tier};
 use silkai_server::config::{AppConfig, ConfiguredModel};
@@ -60,7 +64,7 @@ fn too_big() -> ConfiguredModel {
 #[tokio::test]
 async fn prefetch_then_soap_wakes_fake_engine() {
     let rt = Runtime::new(clinic_cfg()).await.unwrap();
-    let (job, mut tokens) = rt.submit_chat("soap", "note").await.unwrap();
+    let (job, mut tokens) = rt.submit_chat("soap", user("note")).await.unwrap();
     let mut out = String::new();
     while let Some(t) = tokens.recv().await {
         out.push_str(&t);
@@ -75,7 +79,7 @@ async fn prefetch_then_soap_wakes_fake_engine() {
 #[tokio::test]
 async fn unknown_model_errors() {
     let rt = Runtime::new(clinic_cfg()).await.unwrap();
-    let err = rt.submit_chat("nope", "x").await.unwrap_err();
+    let err = rt.submit_chat("nope", user("x")).await.unwrap_err();
     assert!(matches!(err, RuntimeError::Unknown));
 }
 
@@ -84,7 +88,7 @@ async fn disabled_model_errors() {
     let mut cfg = clinic_cfg();
     cfg.disabled.push(too_big());
     let rt = Runtime::new(cfg).await.unwrap();
-    let err = rt.submit_chat("too-big", "x").await.unwrap_err();
+    let err = rt.submit_chat("too-big", user("x")).await.unwrap_err();
     assert!(matches!(err, RuntimeError::Disabled));
 }
 
@@ -103,7 +107,7 @@ fn llama_soap_cfg() -> AppConfig {
 #[tokio::test]
 async fn llama_cpp_submit_unavailable_without_feature() {
     let rt = Runtime::new(llama_soap_cfg()).await.unwrap();
-    let err = rt.submit_chat("soap", "x").await.unwrap_err();
+    let err = rt.submit_chat("soap", user("x")).await.unwrap_err();
     assert!(
         matches!(err, RuntimeError::Unavailable),
         "expected Unavailable, got {err:?}"
@@ -137,7 +141,7 @@ async fn vllm_engine_is_known() {
     let rt = Runtime::new(vllm_soap_cfg(Some("http://127.0.0.1:1")))
         .await
         .unwrap();
-    let err = rt.submit_chat("soap", "x").await.unwrap_err();
+    let err = rt.submit_chat("soap", user("x")).await.unwrap_err();
     assert!(
         !matches!(err, RuntimeError::Unavailable | RuntimeError::Unknown),
         "expected an engine error, got {err:?}"
@@ -148,7 +152,7 @@ async fn vllm_engine_is_known() {
 async fn vllm_submit_streams_from_http_engine() {
     let url = spawn_vllm_mock().await;
     let rt = Runtime::new(vllm_soap_cfg(Some(&url))).await.unwrap();
-    let (job, mut tokens) = rt.submit_chat("soap", "note").await.unwrap();
+    let (job, mut tokens) = rt.submit_chat("soap", user("note")).await.unwrap();
     let mut out = String::new();
     while let Some(t) = tokens.recv().await {
         out.push_str(&t);
@@ -174,7 +178,7 @@ fn process_soap_cfg(url: Option<&str>) -> AppConfig {
 async fn process_submit_streams_from_spawned_http() {
     let url = spawn_vllm_mock().await;
     let rt = Runtime::new(process_soap_cfg(Some(&url))).await.unwrap();
-    let (job, mut tokens) = rt.submit_chat("soap", "note").await.unwrap();
+    let (job, mut tokens) = rt.submit_chat("soap", user("note")).await.unwrap();
     let mut out = String::new();
     while let Some(t) = tokens.recv().await {
         out.push_str(&t);
@@ -200,7 +204,7 @@ async fn ollama_engine_is_known() {
     let rt = Runtime::new(ollama_soap_cfg(Some("http://127.0.0.1:1")))
         .await
         .unwrap();
-    let err = rt.submit_chat("soap", "x").await.unwrap_err();
+    let err = rt.submit_chat("soap", user("x")).await.unwrap_err();
     assert!(
         !matches!(err, RuntimeError::Unavailable | RuntimeError::Unknown),
         "expected an engine error, got {err:?}"
@@ -211,7 +215,7 @@ async fn ollama_engine_is_known() {
 async fn ollama_submit_streams_from_http_engine() {
     let url = spawn_ollama_mock().await;
     let rt = Runtime::new(ollama_soap_cfg(Some(&url))).await.unwrap();
-    let (job, mut tokens) = rt.submit_chat("soap", "note").await.unwrap();
+    let (job, mut tokens) = rt.submit_chat("soap", user("note")).await.unwrap();
     let mut out = String::new();
     while let Some(t) = tokens.recv().await {
         out.push_str(&t);
@@ -261,7 +265,7 @@ fn model_status(rt: &Runtime, name: &str) -> (Tier, u32) {
 }
 
 async fn collect_chat(rt: &Runtime, model: &str, prompt: &str) -> String {
-    let (job, mut tokens) = rt.submit_chat(model, prompt).await.unwrap();
+    let (job, mut tokens) = rt.submit_chat(model, user(prompt)).await.unwrap();
     let mut out = String::new();
     while let Some(t) = tokens.recv().await {
         out.push_str(&t);
@@ -274,7 +278,7 @@ async fn collect_chat(rt: &Runtime, model: &str, prompt: &str) -> String {
 async fn load_failure_unloads_and_next_submit_retries() {
     FakeEngine::fail_next_load("crashy-load");
     let rt = Runtime::new(crashy_cfg("crashy-load")).await.unwrap();
-    let err = rt.submit_chat("crashy-load", "x").await.unwrap_err();
+    let err = rt.submit_chat("crashy-load", user("x")).await.unwrap_err();
     assert!(
         matches!(err, RuntimeError::Engine(_)),
         "expected engine error, got {err:?}"
@@ -293,7 +297,7 @@ async fn load_failure_unloads_and_next_submit_retries() {
 async fn run_failure_unloads_and_next_submit_retries() {
     FakeEngine::fail_next_run("crashy-run");
     let rt = Runtime::new(crashy_cfg("crashy-run")).await.unwrap();
-    let err = rt.submit_chat("crashy-run", "x").await.unwrap_err();
+    let err = rt.submit_chat("crashy-run", user("x")).await.unwrap_err();
     assert!(
         matches!(err, RuntimeError::Engine(_)),
         "expected engine error, got {err:?}"
@@ -311,7 +315,7 @@ async fn run_failure_unloads_and_next_submit_retries() {
 #[tokio::test]
 async fn unknown_engine_submit_unavailable() {
     let rt = Runtime::new(nope_soap_cfg()).await.unwrap();
-    let err = rt.submit_chat("soap", "x").await.unwrap_err();
+    let err = rt.submit_chat("soap", user("x")).await.unwrap_err();
     assert!(
         matches!(err, RuntimeError::Unavailable),
         "expected Unavailable, got {err:?}"
@@ -321,10 +325,10 @@ async fn unknown_engine_submit_unavailable() {
 #[tokio::test]
 async fn stream_end_then_live_submit_does_not_panic() {
     let rt = Runtime::new(clinic_cfg()).await.unwrap();
-    let (soap_job, mut tokens) = rt.submit_chat("soap", "note").await.unwrap();
+    let (soap_job, mut tokens) = rt.submit_chat("soap", user("note")).await.unwrap();
     while tokens.recv().await.is_some() {}
     // do NOT call finished(soap) yet
-    let (w_job, mut wtok) = rt.submit_chat("whisper", "hi").await.unwrap();
+    let (w_job, mut wtok) = rt.submit_chat("whisper", user("hi")).await.unwrap();
     while wtok.recv().await.is_some() {}
     rt.finished(soap_job).await; // must not panic; should be idempotent
     rt.finished(w_job).await; // must not panic
@@ -333,10 +337,10 @@ async fn stream_end_then_live_submit_does_not_panic() {
 #[tokio::test]
 async fn preempted_soap_does_not_replay_streamed_tokens() {
     let rt = Runtime::new(clinic_cfg()).await.unwrap();
-    let (soap_job, mut soap_rx) = rt.submit_chat("soap", "note").await.unwrap();
+    let (soap_job, mut soap_rx) = rt.submit_chat("soap", user("note")).await.unwrap();
     let first = soap_rx.recv().await.expect("first soap token");
     assert_eq!(first, "note");
-    let (w_job, mut w_rx) = rt.submit_chat("whisper", "hi").await.unwrap();
+    let (w_job, mut w_rx) = rt.submit_chat("whisper", user("hi")).await.unwrap();
     while w_rx.recv().await.is_some() {}
     rt.finished(w_job).await;
     let mut got = vec![first];
@@ -375,7 +379,10 @@ async fn websocket_session_holds_slot_until_end() {
         .find(|m| m.name == "whisper")
         .unwrap();
     assert_eq!(whisper.running, 1);
-    let mut rx = rt.session_prompt(job, "whisper", "hello").await.unwrap();
+    let mut rx = rt
+        .session_prompt(job, "whisper", &user("hello"))
+        .await
+        .unwrap();
     let mut out = String::new();
     while let Some(t) = rx.recv().await {
         out.push_str(&t);

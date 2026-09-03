@@ -90,6 +90,61 @@ async fn llama_cpp_without_feature_returns_503() {
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+fn chat_body(messages: serde_json::Value) -> Request<Body> {
+    let body = serde_json::json!({"model": "soap", "messages": messages});
+    Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn answer(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The fake engine echoes the last message; a system prompt ahead of it
+/// must not displace the user turn.
+#[tokio::test]
+async fn system_prompt_keeps_user_turn_last() {
+    let app = test_app().await;
+    let res = app
+        .oneshot(chat_body(serde_json::json!([
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "hello"}
+        ])))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(answer(res).await, "hello world");
+}
+
+/// Newer clients send `content` as a list of parts; the text parts are joined.
+#[tokio::test]
+async fn content_parts_are_joined() {
+    let app = test_app().await;
+    let res = app
+        .oneshot(chat_body(serde_json::json!([
+            {"role": "user", "content": [
+                {"type": "text", "text": "hel"},
+                {"type": "image_url", "image_url": {"url": "data:,"}},
+                {"type": "text", "text": "lo"}
+            ]}
+        ])))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(answer(res).await, "hello world");
+}
+
 #[tokio::test]
 async fn disabled_model_400() {
     let app = silkai_server::app::test_app_with_disabled().await;

@@ -6,6 +6,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
+use silkai_adapters::ChatMessage;
 use silkai_sched::JobId;
 use tokio::sync::mpsc;
 
@@ -17,12 +18,27 @@ pub struct SessionQuery {
     pub model: String,
 }
 
+/// `{"type":"prompt","content":"..."}` sends one user turn. Send
+/// `{"type":"prompt","messages":[{"role":"system","content":"..."},...]}`
+/// to give the model a system prompt or history instead.
 #[derive(Deserialize)]
 struct ClientMsg {
     #[serde(rename = "type")]
     kind: String,
     #[serde(default)]
     content: String,
+    #[serde(default)]
+    messages: Vec<ChatMessage>,
+}
+
+impl ClientMsg {
+    fn into_messages(self) -> Vec<ChatMessage> {
+        if self.messages.is_empty() {
+            vec![ChatMessage::user(self.content)]
+        } else {
+            self.messages
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -69,8 +85,8 @@ async fn run_session(mut socket: WebSocket, rt: Arc<Runtime>, model: String) {
                 break;
             }
             Recv::Closed => break,
-            Recv::Prompt(content) => {
-                if let Err(err) = stream_prompt(&mut socket, &rt, job, &model, &content).await {
+            Recv::Prompt(messages) => {
+                if let Err(err) = stream_prompt(&mut socket, &rt, job, &model, &messages).await {
                     let msg = err.to_string();
                     let _ = send_json(&mut socket, "error", None, Some(&msg)).await;
                     break;
@@ -84,7 +100,7 @@ async fn run_session(mut socket: WebSocket, rt: Arc<Runtime>, model: String) {
 }
 
 enum Recv {
-    Prompt(String),
+    Prompt(Vec<ChatMessage>),
     Stop,
     Idle,
     Closed,
@@ -105,7 +121,7 @@ fn parse_client(text: &str) -> Recv {
         return Recv::Closed;
     };
     match msg.kind.as_str() {
-        "prompt" => Recv::Prompt(msg.content),
+        "prompt" => Recv::Prompt(msg.into_messages()),
         "stop" => Recv::Stop,
         _ => Recv::Closed,
     }
@@ -116,9 +132,9 @@ async fn stream_prompt(
     rt: &Runtime,
     job: JobId,
     model: &str,
-    prompt: &str,
+    messages: &[ChatMessage],
 ) -> Result<(), RuntimeError> {
-    let mut rx: mpsc::Receiver<String> = rt.session_prompt(job, model, prompt).await?;
+    let mut rx: mpsc::Receiver<String> = rt.session_prompt(job, model, messages).await?;
     while let Some(text) = rx.recv().await {
         send_json(socket, "token", Some(&text), None).await?;
     }

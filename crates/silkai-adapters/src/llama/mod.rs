@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Engine, EngineError};
+use crate::{ChatMessage, Engine, EngineError};
 
 #[cfg(feature = "llama")]
 mod cpp;
@@ -78,11 +78,11 @@ impl Engine for LlamaEngine {
 
     async fn run(
         &self,
-        prompt: &str,
+        messages: &[ChatMessage],
         prefix: &str,
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError> {
-        start_run(self, prompt, prefix, cancel)
+        start_run(self, messages, prefix, cancel)
     }
 
     fn measured_vram_gb(&self) -> f64 {
@@ -118,13 +118,13 @@ async fn place_model(
 #[cfg(feature = "llama")]
 fn start_run(
     engine: &LlamaEngine,
-    prompt: &str,
+    messages: &[ChatMessage],
     prefix: &str,
     cancel: CancellationToken,
 ) -> Result<mpsc::Receiver<String>, EngineError> {
     cpp::start_run(
         Arc::clone(&engine.inner),
-        prompt.to_string(),
+        messages.to_vec(),
         prefix.to_string(),
         cancel,
     )
@@ -133,11 +133,11 @@ fn start_run(
 #[cfg(not(feature = "llama"))]
 fn start_run(
     engine: &LlamaEngine,
-    prompt: &str,
+    messages: &[ChatMessage],
     prefix: &str,
     cancel: CancellationToken,
 ) -> Result<mpsc::Receiver<String>, EngineError> {
-    let _ = (engine, prompt, prefix, cancel);
+    let _ = (engine, messages, prefix, cancel);
     refuse_without_feature()
 }
 
@@ -179,7 +179,7 @@ mod llama_stub_tests {
     async fn run_fails_without_feature() {
         let e = LlamaEngine::new("soap", 1.0);
         let err = e
-            .run("hello", "", CancellationToken::new())
+            .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
             .await
             .unwrap_err();
         match err {

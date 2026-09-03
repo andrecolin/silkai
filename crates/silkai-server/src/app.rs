@@ -11,6 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::unfold;
 use serde::{Deserialize, Serialize};
+use silkai_adapters::ChatMessage;
 use silkai_sched::clinic::{clinic_models, clinic_resources};
 use silkai_sched::{JobId, ModelSpec, Priority, StatusSnapshot};
 use tokio::sync::mpsc;
@@ -122,13 +123,40 @@ struct ChatRequest {
     #[serde(default)]
     stream: bool,
     #[serde(default)]
-    messages: Vec<ChatMessage>,
+    messages: Vec<WireMessage>,
 }
 
+/// One OpenAI-style message as clients send it. `content` is usually a
+/// string; newer clients send a list of parts, of which the text parts are
+/// joined. Anything else (images, tool calls) is dropped for now.
 #[derive(Deserialize)]
-struct ChatMessage {
+struct WireMessage {
+    #[serde(default = "default_role")]
+    role: String,
     #[serde(default)]
-    content: String,
+    content: serde_json::Value,
+}
+
+fn default_role() -> String {
+    "user".into()
+}
+
+impl WireMessage {
+    fn into_chat(self) -> ChatMessage {
+        ChatMessage::new(self.role, content_text(self.content))
+    }
+}
+
+fn content_text(value: serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Array(parts) => parts
+            .into_iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(str::to_string))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
 }
 
 async fn chat_completions(
@@ -136,7 +164,9 @@ async fn chat_completions(
     Json(req): Json<ChatRequest>,
 ) -> Response {
     let rt = runtime_of(&state).await;
-    match rt.submit_chat(&req.model, prompt_of(&req)).await {
+    let model = req.model;
+    let messages = messages_of(req.messages);
+    match rt.submit_chat(&model, messages).await {
         Ok((job, rx)) => finish_chat(&rt, job, rx, req.stream).await,
         Err(err) => chat_error(err).into_response(),
     }
@@ -170,11 +200,8 @@ fn running_jobs(rt: &Runtime) -> u32 {
     rt.status().models.iter().map(|m| m.running).sum()
 }
 
-fn prompt_of(req: &ChatRequest) -> &str {
-    req.messages
-        .last()
-        .map(|m| m.content.as_str())
-        .unwrap_or("")
+fn messages_of(wire: Vec<WireMessage>) -> Vec<ChatMessage> {
+    wire.into_iter().map(WireMessage::into_chat).collect()
 }
 
 async fn finish_chat(

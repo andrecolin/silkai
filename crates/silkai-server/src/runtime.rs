@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
 use silkai_adapters::{
-    Engine, EngineError, FakeEngine, LlamaEngine, OllamaEngine, ProcessEngine, VllmEngine,
+    ChatMessage, Engine, EngineError, FakeEngine, LlamaEngine, OllamaEngine, ProcessEngine,
+    VllmEngine,
 };
 use silkai_sched::{
     Action, JobId, RejectReason, SchedError, Scheduler, StatusSnapshot, SubmitResult,
@@ -30,7 +31,7 @@ pub enum RuntimeError {
 }
 
 struct Waiter {
-    prompt: String,
+    messages: Vec<ChatMessage>,
     emitted: String,
     tx: mpsc::Sender<String>,
 }
@@ -90,12 +91,12 @@ impl Runtime {
     pub async fn submit_chat(
         &self,
         model: &str,
-        prompt: &str,
+        messages: Vec<ChatMessage>,
     ) -> Result<(JobId, mpsc::Receiver<String>), RuntimeError> {
         self.ensure_enabled(model)?;
         self.ensure_available(model)?;
         let (tx, rx) = mpsc::channel(16);
-        let job_id = self.accept(model, prompt, tx).await?;
+        let job_id = self.accept(model, messages, tx).await?;
         Ok((job_id, rx))
     }
 
@@ -152,7 +153,7 @@ impl Runtime {
         &self,
         job_id: JobId,
         model: &str,
-        prompt: &str,
+        messages: &[ChatMessage],
     ) -> Result<mpsc::Receiver<String>, RuntimeError> {
         if !self.inner.sessions.lock().await.contains(&job_id) {
             return Err(RuntimeError::Unknown);
@@ -162,7 +163,7 @@ impl Runtime {
         }
         let token = self.watch(job_id).await;
         let engine = Arc::clone(self.engine(model)?);
-        engine.run(prompt, "", token).await.map_err(engine_err)
+        engine.run(messages, "", token).await.map_err(engine_err)
     }
 
     async fn wait_until_running(&self, job_id: JobId) -> Result<(), RuntimeError> {
@@ -251,7 +252,7 @@ impl Runtime {
     async fn accept(
         &self,
         model: &str,
-        prompt: &str,
+        messages: Vec<ChatMessage>,
         tx: mpsc::Sender<String>,
     ) -> Result<JobId, RuntimeError> {
         let mut sched = self.inner.scheduler.lock().await;
@@ -259,7 +260,7 @@ impl Runtime {
             SubmitResult::Accepted { job_id, actions } => (job_id, actions),
             SubmitResult::Rejected { reason } => return Err(reject_err(reason)),
         };
-        self.store_waiter(job_id, prompt, tx).await;
+        self.store_waiter(job_id, messages, tx).await;
         if let Err(err) = self.apply_all(actions).await {
             self.isolate(&mut sched, job_id).await;
             return Err(err);
@@ -320,22 +321,30 @@ impl Runtime {
         *self.inner.snapshot.lock().expect("status mutex") = sched.status();
     }
 
-    async fn store_waiter(&self, job_id: JobId, prompt: &str, tx: mpsc::Sender<String>) {
+    async fn store_waiter(
+        &self,
+        job_id: JobId,
+        messages: Vec<ChatMessage>,
+        tx: mpsc::Sender<String>,
+    ) {
         let waiter = Waiter {
-            prompt: prompt.to_string(),
+            messages,
             emitted: String::new(),
             tx,
         };
         self.inner.waiters.lock().await.insert(job_id, waiter);
     }
 
-    async fn waiter(&self, job_id: JobId) -> Option<(String, String, mpsc::Sender<String>)> {
+    async fn waiter(
+        &self,
+        job_id: JobId,
+    ) -> Option<(Vec<ChatMessage>, String, mpsc::Sender<String>)> {
         self.inner
             .waiters
             .lock()
             .await
             .get(&job_id)
-            .map(|w| (w.prompt.clone(), w.emitted.clone(), w.tx.clone()))
+            .map(|w| (w.messages.clone(), w.emitted.clone(), w.tx.clone()))
     }
 
     async fn append_emitted(&self, job_id: JobId, chunk: &str) {
@@ -424,13 +433,13 @@ impl Runtime {
     }
 
     async fn start(&self, job_id: JobId, model: &str) -> Result<(), RuntimeError> {
-        let Some((prompt, prefix, tx)) = self.waiter(job_id).await else {
+        let Some((messages, prefix, tx)) = self.waiter(job_id).await else {
             return Ok(());
         };
         let token = self.watch(job_id).await;
         let engine = Arc::clone(self.engine(model)?);
         let rx = engine
-            .run(&prompt, &prefix, token.clone())
+            .run(&messages, &prefix, token.clone())
             .await
             .map_err(engine_err)?;
         let rt = self.clone();

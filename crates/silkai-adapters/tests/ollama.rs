@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
-use silkai_adapters::{Engine, EngineError, OllamaEngine};
+use silkai_adapters::{ChatMessage, Engine, EngineError, OllamaEngine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -47,7 +47,10 @@ async fn ollama_run_streams_ndjson_content() {
     let (url, log) = spawn_mock().await;
     let e = OllamaEngine::new("write", 28.0, &url);
     e.load("llama3.2", 0).await.unwrap();
-    let mut rx = e.run("hello", "", CancellationToken::new()).await.unwrap();
+    let mut rx = e
+        .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
+        .await
+        .unwrap();
     let mut got = Vec::new();
     while let Some(t) = rx.recv().await {
         got.push(t);
@@ -64,7 +67,7 @@ async fn ollama_run_without_load_is_not_loaded() {
     let (url, _) = spawn_mock().await;
     let e = OllamaEngine::new("write", 28.0, &url);
     let err = e
-        .run("hello", "", CancellationToken::new())
+        .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotLoaded));
@@ -77,7 +80,7 @@ async fn ollama_run_after_sleep_is_not_loaded() {
     e.load("llama3.2", 0).await.unwrap();
     e.sleep().await.unwrap();
     let err = e
-        .run("hello", "", CancellationToken::new())
+        .run(&[ChatMessage::user("hello")], "", CancellationToken::new())
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotLoaded));
@@ -90,7 +93,10 @@ async fn ollama_run_stops_on_cancel() {
     e.load("llama3.2", 0).await.unwrap();
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let mut rx = e.run("hello", "", cancel).await.unwrap();
+    let mut rx = e
+        .run(&[ChatMessage::user("hello")], "", cancel)
+        .await
+        .unwrap();
     assert!(rx.recv().await.is_none());
 }
 
