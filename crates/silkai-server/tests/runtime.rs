@@ -36,6 +36,7 @@ fn clinic_cfg() -> AppConfig {
         resources: clinic_resources(),
         enabled: models,
         disabled: vec![],
+        ui: Default::default(),
     }
 }
 
@@ -251,6 +252,7 @@ fn crashy_cfg(name: &str) -> AppConfig {
             },
         }],
         disabled: vec![],
+        ui: Default::default(),
     }
 }
 

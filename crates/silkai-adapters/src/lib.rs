@@ -75,4 +75,17 @@ pub trait Engine: Send + Sync {
         cancel: CancellationToken,
     ) -> Result<mpsc::Receiver<String>, EngineError>;
     fn measured_vram_gb(&self) -> f64;
+
+    /// Whether `sleep` keeps a copy in host RAM that `wake` restores without
+    /// touching disk. Engines that kill a child or re-read the file say no,
+    /// so status does not report RAM that is not held.
+    fn has_shelf(&self) -> bool {
+        false
+    }
+
+    /// The OS process holding this model's VRAM, if any, so the sampler can
+    /// attribute what the card measures.
+    fn pid(&self) -> Option<u32> {
+        None
+    }
 }

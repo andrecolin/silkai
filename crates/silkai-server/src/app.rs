@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use futures_util::stream::unfold;
 use serde::{Deserialize, Serialize};
 use silkai_adapters::ChatMessage;
-use silkai_sched::{JobId, StatusSnapshot};
+use silkai_sched::JobId;
 use tokio::sync::mpsc;
 
 use crate::config::{load_from_path, AppConfig, ConfigError};
@@ -117,7 +117,7 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<ModelList> {
     Json(ModelList::from_names(rt.configured_models()))
 }
 
-async fn status(State(state): State<Arc<AppState>>) -> Json<StatusSnapshot> {
+async fn status(State(state): State<Arc<AppState>>) -> Json<crate::status::Status> {
     Json(runtime_of(&state).await.status())
 }
 
@@ -397,6 +397,7 @@ fn clinic_cfg() -> AppConfig {
         resources: clinic_resources(),
         enabled: clinic_models().into_iter().map(fake_model).collect(),
         disabled: vec![],
+        ui: Default::default(),
     }
 }
 

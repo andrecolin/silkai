@@ -1,6 +1,8 @@
 pub mod app;
 pub mod config;
 pub mod runtime;
+pub mod sampler;
+pub mod status;
 pub(crate) mod ws;
 
 mod serve;

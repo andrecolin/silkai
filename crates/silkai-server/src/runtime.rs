@@ -9,6 +9,9 @@ use silkai_adapters::{
 use silkai_sched::{
     Action, JobId, RejectReason, SchedError, Scheduler, StatusSnapshot, SubmitResult,
 };
+
+use crate::sampler::{self, Sample};
+use crate::status::{self, ModelFacts, Status};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -50,7 +53,12 @@ struct Inner {
     request_timeout: Duration,
     transports: HashMap<String, String>,
     idle_timeouts: HashMap<String, Duration>,
-    sessions: Mutex<HashSet<JobId>>,
+    /// Open session sockets and the model each one holds.
+    sessions: StdMutex<HashMap<JobId, String>>,
+    models: HashMap<String, ConfiguredModel>,
+    /// `loading` or `sleeping` while an engine call is in flight.
+    overlays: StdMutex<HashMap<String, &'static str>>,
+    sample: sampler::Shared,
 }
 
 impl Inner {
@@ -70,7 +78,14 @@ impl Inner {
             request_timeout: cfg.request_timeout,
             transports: transports_for(&cfg.enabled),
             idle_timeouts: idle_timeouts_for(&cfg.enabled),
-            sessions: Mutex::new(HashSet::new()),
+            sessions: StdMutex::new(HashMap::new()),
+            models: cfg
+                .enabled
+                .iter()
+                .map(|m| (m.spec.name.clone(), m.clone()))
+                .collect(),
+            overlays: StdMutex::new(HashMap::new()),
+            sample: sampler::start(),
         }
     }
 }
@@ -134,10 +149,10 @@ impl Runtime {
             SubmitResult::Accepted { job_id, actions } => (job_id, actions),
             SubmitResult::Rejected { reason } => return Err(reject_err(reason)),
         };
-        self.inner.sessions.lock().await.insert(job_id);
+        self.sessions().insert(job_id, model.to_string());
         drop(sched);
         if let Err(err) = self.apply_all(actions).await {
-            self.inner.sessions.lock().await.remove(&job_id);
+            self.sessions().remove(&job_id);
             let mut sched = self.inner.scheduler.lock().await;
             self.isolate(&mut sched, job_id).await;
             return Err(err);
@@ -155,7 +170,7 @@ impl Runtime {
         model: &str,
         messages: &[ChatMessage],
     ) -> Result<mpsc::Receiver<String>, RuntimeError> {
-        if !self.inner.sessions.lock().await.contains(&job_id) {
+        if !self.sessions().contains_key(&job_id) {
             return Err(RuntimeError::Unknown);
         }
         if let Some(old) = self.inner.cancels.lock().await.remove(&job_id) {
@@ -184,7 +199,7 @@ impl Runtime {
     }
 
     pub async fn end_session(&self, job_id: JobId) {
-        self.inner.sessions.lock().await.remove(&job_id);
+        self.sessions().remove(&job_id);
         self.drop_job(job_id).await;
     }
 
@@ -199,8 +214,72 @@ impl Runtime {
         self.enqueue_apply(actions);
     }
 
-    pub fn status(&self) -> StatusSnapshot {
-        self.inner.snapshot.lock().expect("status mutex").clone()
+    pub fn status(&self) -> Status {
+        let snap = self.inner.snapshot.lock().expect("status mutex").clone();
+        let overlays = self.inner.overlays.lock().expect("overlay mutex").clone();
+        let sessions = self.session_counts();
+        let sample = self.inner.sample.lock().expect("sampler mutex").clone();
+        status::assemble(
+            &snap,
+            |name| self.facts(name, &overlays, &sessions),
+            sample.as_ref(),
+        )
+    }
+
+    /// Replace the card sample, for tests that have no nvidia-smi.
+    #[doc(hidden)]
+    pub fn inject_sample(&self, sample: Option<Sample>) {
+        *self.inner.sample.lock().expect("sampler mutex") = sample;
+    }
+
+    fn sessions(&self) -> std::sync::MutexGuard<'_, HashMap<JobId, String>> {
+        self.inner.sessions.lock().expect("sessions mutex")
+    }
+
+    fn session_counts(&self) -> HashMap<String, u32> {
+        let mut counts = HashMap::new();
+        for model in self.sessions().values() {
+            *counts.entry(model.clone()).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    fn facts(
+        &self,
+        name: &str,
+        overlays: &HashMap<String, &'static str>,
+        sessions: &HashMap<String, u32>,
+    ) -> Option<ModelFacts> {
+        let m = self.inner.models.get(name)?;
+        let engine = self.inner.engines.get(name)?;
+        Some(ModelFacts {
+            engine: m.engine.clone(),
+            budget_gb: m.spec.vram_gb,
+            ram_gb: m.spec.ram_gb,
+            priority: m.spec.priority,
+            exclusive: m.spec.exclusive,
+            slots: m.spec.slots,
+            overlay: overlays.get(name).copied(),
+            sessions: sessions.get(name).copied().unwrap_or(0),
+            has_shelf: engine.has_shelf(),
+            pid: engine.pid(),
+        })
+    }
+
+    fn set_overlay(&self, model: &str, state: &'static str) {
+        self.inner
+            .overlays
+            .lock()
+            .expect("overlay mutex")
+            .insert(model.to_string(), state);
+    }
+
+    fn clear_overlay(&self, model: &str) {
+        self.inner
+            .overlays
+            .lock()
+            .expect("overlay mutex")
+            .remove(model);
     }
 
     pub fn request_timeout(&self) -> Duration {
@@ -407,18 +486,27 @@ impl Runtime {
 
     async fn load(&self, model: &str, gpu: u32) -> Result<(), RuntimeError> {
         let path = self.path(model)?;
-        self.engine(model)?
-            .load(path, gpu)
-            .await
-            .map_err(engine_err)
+        let engine = self.engine(model)?;
+        self.set_overlay(model, "loading");
+        let result = engine.load(path, gpu).await.map_err(engine_err);
+        self.clear_overlay(model);
+        result
     }
 
     async fn wake(&self, model: &str, gpu: u32) -> Result<(), RuntimeError> {
-        self.engine(model)?.wake(gpu).await.map_err(engine_err)
+        let engine = self.engine(model)?;
+        self.set_overlay(model, "loading");
+        let result = engine.wake(gpu).await.map_err(engine_err);
+        self.clear_overlay(model);
+        result
     }
 
     async fn sleep(&self, model: &str) -> Result<(), RuntimeError> {
-        self.engine(model)?.sleep().await.map_err(engine_err)
+        let engine = self.engine(model)?;
+        self.set_overlay(model, "sleeping");
+        let result = engine.sleep().await.map_err(engine_err);
+        self.clear_overlay(model);
+        result
     }
 
     async fn discard(&self, model: &str) -> Result<(), RuntimeError> {

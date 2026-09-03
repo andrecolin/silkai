@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,6 +17,9 @@ fn fail_next() -> &'static Mutex<HashMap<String, FailNext>> {
 struct FailNext {
     load: u32,
     run: u32,
+    /// Hold the next load until this is notified, so tests can observe the
+    /// runtime while a load is in flight.
+    hold_load: Option<Arc<tokio::sync::Notify>>,
 }
 
 fn take_fail(name: &str, which: fn(&mut FailNext) -> &mut u32) -> bool {
@@ -73,6 +76,27 @@ impl FakeEngine {
             .load += 1;
     }
 
+    /// Make the next `load` or `wake` of `name` wait until the returned
+    /// handle is notified. Use `notify_one()` to release it.
+    pub fn hold_next_load(name: &str) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        fail_next()
+            .lock()
+            .expect("fail-next mutex")
+            .entry(name.to_string())
+            .or_default()
+            .hold_load = Some(Arc::clone(&gate));
+        gate
+    }
+
+    fn take_hold(name: &str) -> Option<Arc<tokio::sync::Notify>> {
+        fail_next()
+            .lock()
+            .expect("fail-next mutex")
+            .get_mut(name)
+            .and_then(|f| f.hold_load.take())
+    }
+
     pub fn fail_next_run(name: &str) {
         fail_next()
             .lock()
@@ -116,12 +140,18 @@ impl Engine for FakeEngine {
         if take_fail(&self.name, |f| &mut f.load) {
             return Err(EngineError::Other("load failed".into()));
         }
+        if let Some(gate) = Self::take_hold(&self.name) {
+            gate.notified().await;
+        }
         self.lock().gpu = Some(gpu);
         self.record("load", Tier::Bench);
         Ok(())
     }
 
     async fn wake(&self, gpu: u32) -> Result<(), EngineError> {
+        if let Some(gate) = Self::take_hold(&self.name) {
+            gate.notified().await;
+        }
         self.lock().gpu = Some(gpu);
         self.record("wake", Tier::Bench);
         Ok(())
@@ -155,6 +185,10 @@ impl Engine for FakeEngine {
 
     fn measured_vram_gb(&self) -> f64 {
         self.vram_gb
+    }
+
+    fn has_shelf(&self) -> bool {
+        true
     }
 }
 
