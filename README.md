@@ -229,6 +229,39 @@ cmd = ["llama-server", "--model", "/models/write-q4.gguf", "--alias", "write",
 `examples/llama-server.toml` is a complete three-model setup on this
 pattern. It needs no `--features` on SilkAI; the GPU work is in llama.cpp.
 
+## Status page and metrics
+
+Every daemon serves `GET /v1/status` (tiers, a `loading` state while a
+model is on its way to the card, the configured `vram_gb` budget beside
+what nvidia-smi measures for that model's process, queue depth, open
+sessions), `GET /v1/events` (Server-Sent Events: the last 500 scheduler
+events replayed, then live; `?after=<seq>` skips the replay), and
+`GET /metrics` in Prometheus text format:
+
+```text
+silkai_gpu_measured_used_gb{gpu="0"} 22.1
+silkai_model_state{model="write",state="bench"} 1
+silkai_model_queued{model="write"} 0
+silkai_loads_total{model="write"} 4
+silkai_load_seconds_sum{model="write"} 33.2
+```
+
+The page is optional and off by default. Turn it on and open
+`http://127.0.0.1:8080/ui` to see each card drawn to scale, the shelf, and
+the event log:
+
+```toml
+[ui]
+enabled = true
+token = "change-me"   # optional; guards /ui, /metrics and /admin/*
+```
+
+The token is sent as `Authorization: Bearer <token>` by tools, or typed as
+the password when the browser asks (any user name). `/v1/*` never needs it.
+The daemon still binds to loopback only; to reach the page from another
+machine put a reverse proxy with TLS in front of it. The page loads nothing
+from the internet. Changing `[ui]` needs a restart.
+
 ## Development
 
 ```bash

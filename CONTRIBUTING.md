@@ -42,6 +42,15 @@ SILKAI_ITEST=1 SILKAI_GGUF_A=/path/tiny.gguf SILKAI_GGUF_B=/path/small.gguf \
   cargo test -p silkai-server --features llama --test itest_llama -- --nocapture
 ```
 
+## The status page
+
+`crates/silkai-server/ui/index.html` is one file of plain HTML, CSS, and
+JavaScript, embedded with `include_str!`. That is deliberate: no framework,
+no bundler, no external assets, so `cargo install` is the whole build and the
+page works on an offline server. Improve it in place; PRs that add a
+JavaScript toolchain will be asked to build on `/v1/status` and
+`/v1/events` in a separate repo instead.
+
 ## Crate boundaries
 
 `silkai-sched` is a pure scheduler: numeric GB, priority, exclusive, slots.

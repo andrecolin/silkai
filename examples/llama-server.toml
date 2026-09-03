@@ -11,6 +11,12 @@
 
 listen = "127.0.0.1:8080"
 
+# Optional status page at /ui. Off by default; /v1/status, /v1/events and
+# /metrics are always on. A token guards /ui, /metrics and /admin/*.
+# [ui]
+# enabled = true
+# token = "change-me"
+
 [resources]
 # gpu_total_gb and ram_total_gb are probed (nvidia-smi, /proc/meminfo).
 gpu_headroom_gb = 4
