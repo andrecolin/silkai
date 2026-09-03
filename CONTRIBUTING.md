@@ -68,6 +68,11 @@ cargo publish --workspace --dry-run    # packages and verifies all four locally
 cargo publish --workspace
 ```
 
+If you dry-run, change code, and dry-run again at the same version, the
+verify step can compile the *old* copy of a sibling crate: cargo treats
+registry sources as immutable and reuses the earlier build. `cargo clean`
+first, then dry-run again.
+
 Every crate inherits its metadata from `[workspace.package]`, and the
 inter-crate dependencies are declared once under `[workspace.dependencies]`
 with both `path` and `version`, so a single version bump moves everything.
