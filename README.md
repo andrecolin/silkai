@@ -279,7 +279,7 @@ whose block did not change stay where they are; removed or changed ones are
 discarded first, then anything new loads. `SIGTERM` or Ctrl-C shuts down
 cleanly and takes the child processes with it.
 
-## Computer with Several GPU Cards
+## Computer with Several GPUs
 
 Each card is its own bench; RAM is one shared shelf. List the cards and,
 optionally, pin models:
