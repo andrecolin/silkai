@@ -56,7 +56,9 @@ disk.
 - **Fit together → run together.** A huge model that needs the whole card waits,
   then runs alone.
 - **Live work wins.** Captions or autocomplete are not interrupted. Background
-  jobs fill leftover space and leave first.
+  jobs fill leftover space and leave first. A live request that arrives
+  while a big model is still loading abandons that load (the child is
+  killed) and the waiting job goes back to the front of the queue.
 - **One loaded model, many requests.** Two summaries share the writer. No second
   20-plus-GB load.
 - **Warm RAM, not a disk reload.** After the first load, switching is about 1–3
