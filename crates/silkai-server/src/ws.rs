@@ -169,6 +169,7 @@ async fn stream_prompt(
         match chunk {
             Chunk::Token(text) => send_json(socket, "token", Some(&text), None).await?,
             Chunk::End(e) => end = e,
+            Chunk::Reject(_) => {}
         }
     }
     send_done(socket, &end).await?;

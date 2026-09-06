@@ -405,6 +405,7 @@ async fn preempted_soap_does_not_replay_streamed_tokens() {
         match c {
             Chunk::Token(t) => got.push(t),
             Chunk::End(e) => end = Some(e),
+            Chunk::Reject(_) => {}
         }
     }
     rt.finished(soap_job).await;

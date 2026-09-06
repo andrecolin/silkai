@@ -175,7 +175,14 @@ async fn stream_chat(
         _ = cancel.cancelled() => return,
         result = send => match result {
             Ok(resp) if resp.status().is_success() => resp,
-            _ => return,
+            Ok(resp) => {
+                let _ = tx.send(Chunk::Reject(rejection_of(resp).await)).await;
+                return;
+            }
+            Err(err) => {
+                let _ = tx.send(Chunk::Reject(format!("engine request failed: {err}"))).await;
+                return;
+            }
         }
     };
     let mut resp = resp;
@@ -225,6 +232,19 @@ async fn emit_sse(
         if data == "[DONE]" {
             return false;
         }
+        // Some engines answer a rejection with an in-stream error object
+        // rather than a non-2xx status. Surface it the same way.
+        if let Ok(err) = serde_json::from_str::<serde_json::Value>(data) {
+            if let Some(msg) = err
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .filter(|m| !m.is_empty())
+            {
+                let _ = tx.send(Chunk::Reject(msg.to_string())).await;
+                return false;
+            }
+        }
         let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) else {
             continue;
         };
@@ -250,6 +270,31 @@ async fn emit_sse(
 
 fn http_err(err: reqwest::Error) -> EngineError {
     EngineError::Other(err.to_string())
+}
+
+/// Turn a non-2xx engine response into the reason a client should see.
+/// OpenAI-shaped errors carry `error.message`; anything else is truncated
+/// raw text, with the status as the last resort.
+async fn rejection_of(resp: reqwest::Response) -> String {
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    let body = body.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(msg) = value
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .filter(|m| !m.is_empty())
+        {
+            return msg.to_string();
+        }
+    }
+    if !body.is_empty() {
+        let mut s = body.to_string();
+        s.truncate(500);
+        return s;
+    }
+    format!("engine returned {status}")
 }
 
 #[derive(Deserialize)]

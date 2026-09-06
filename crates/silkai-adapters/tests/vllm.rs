@@ -153,6 +153,7 @@ async fn vllm_reports_finish_reason_and_usage() {
         match chunk {
             Chunk::Token(t) => text.push_str(&t),
             Chunk::End(e) => end = Some(e),
+            Chunk::Reject(_) => {}
         }
     }
     assert_eq!(text, "hello world");
