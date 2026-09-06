@@ -130,7 +130,7 @@ impl Engine for OllamaEngine {
         }
         let client = self.client.clone();
         let url = format!("{}/api/chat", self.url);
-        let messages = with_prefix(messages, prefix);
+        let messages = flatten(with_prefix(messages, prefix));
         let opts = opts.clone();
         tokio::spawn(async move {
             stream_chat(client, url, model, messages, opts, tx, cancel).await;
@@ -141,6 +141,17 @@ impl Engine for OllamaEngine {
     fn measured_vram_gb(&self) -> f64 {
         self.vram_gb
     }
+}
+
+/// Ollama's `/api/chat` takes `content` as a plain string — an image rides in
+/// a separate `images` field, not as an OpenAI content part — so a list of
+/// parts is projected to its text here rather than forwarded the way
+/// llama-server and vLLM take it.
+fn flatten(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .map(|m| ChatMessage::new(m.role, m.content.text().into_owned()))
+        .collect()
 }
 
 async fn stream_chat(

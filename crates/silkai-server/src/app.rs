@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use futures_util::stream::{self, unfold};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use silkai_adapters::{ChatMessage, RunOptions};
+use silkai_adapters::{ChatMessage, Content, RunOptions};
 use silkai_sched::JobId;
 use tokio::sync::mpsc;
 
@@ -245,8 +245,10 @@ impl ChatRequest {
 }
 
 /// One OpenAI-style message as clients send it. `content` is usually a
-/// string; newer clients send a list of parts, of which the text parts are
-/// joined. Anything else (images, tool calls) is dropped for now.
+/// string; newer clients send a list of parts, which is forwarded to the
+/// engine as it arrived — an image part is the engine's to interpret, not
+/// ours to drop. Engines whose wire format has no place for parts project
+/// them to their text.
 #[derive(Deserialize)]
 struct WireMessage {
     #[serde(default = "default_role")]
@@ -261,19 +263,18 @@ fn default_role() -> String {
 
 impl WireMessage {
     fn into_chat(self) -> ChatMessage {
-        ChatMessage::new(self.role, content_text(self.content))
+        ChatMessage::new(self.role, content_of(self.content))
     }
 }
 
-fn content_text(value: serde_json::Value) -> String {
+/// A string stays a string and a list of parts stays a list. Anything else is
+/// a shape no client should send; it becomes empty text rather than an error,
+/// which is what this endpoint has always done with it.
+fn content_of(value: serde_json::Value) -> Content {
     match value {
-        serde_json::Value::String(s) => s,
-        serde_json::Value::Array(parts) => parts
-            .into_iter()
-            .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(str::to_string))
-            .collect::<Vec<_>>()
-            .join(""),
-        _ => String::new(),
+        serde_json::Value::String(s) => Content::Text(s),
+        serde_json::Value::Array(parts) => Content::Parts(parts),
+        _ => Content::Text(String::new()),
     }
 }
 

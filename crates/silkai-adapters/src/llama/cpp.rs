@@ -93,7 +93,7 @@ fn apply_template(model: &LlamaModel, messages: &[ChatMessage]) -> Option<String
     let template = model.chat_template(None).ok()?;
     let chat: Vec<LlamaChatMessage> = messages
         .iter()
-        .map(|m| LlamaChatMessage::new(m.role.clone(), m.content.clone()))
+        .map(|m| LlamaChatMessage::new(m.role.clone(), m.content.text().into_owned()))
         .collect::<Result<_, _>>()
         .ok()?;
     model.apply_chat_template(&template, &chat, true).ok()

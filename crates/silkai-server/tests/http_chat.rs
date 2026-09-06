@@ -137,9 +137,11 @@ async fn system_prompt_keeps_user_turn_last() {
     assert_eq!(answer(res).await, "hello world");
 }
 
-/// Newer clients send `content` as a list of parts; the text parts are joined.
+/// Newer clients send `content` as a list of parts. The list is forwarded to
+/// the engine intact; an engine that takes a plain string still sees the text
+/// parts joined, which is what the fake engine echoes here.
 #[tokio::test]
-async fn content_parts_are_joined() {
+async fn content_parts_project_to_joined_text() {
     let app = test_app().await;
     let res = app
         .oneshot(chat_body(serde_json::json!([

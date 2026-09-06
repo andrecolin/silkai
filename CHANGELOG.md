@@ -4,6 +4,20 @@ All notable changes to SilkAI. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- A `content` list now reaches the engine as a list. SilkAI kept the `text`
+  parts and dropped everything else, so an image sent to a vision model was
+  discarded on the way through and the model answered from the text alone —
+  a confident wrong answer rather than an error. Asked the colour of a solid
+  blue PNG, llama-server answers "Blue" directly and answered "Grey" through
+  SilkAI. `ChatMessage::content` is now a `Content` enum, `Text` or `Parts`,
+  serialized back exactly as it arrived. Engines whose wire format has no
+  place for parts — the in-process llama.cpp engine, and Ollama, whose
+  `/api/chat` carries images in a separate `images` field — project a list to
+  its joined text, which is what every engine received before.
+
 ## [0.5.0] - 2026-09-03
 
 First crates.io release: `silkai`, `silkai-server`, `silkai-adapters`,

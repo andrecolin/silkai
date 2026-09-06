@@ -100,6 +100,33 @@ async fn vllm_forwards_every_message_and_prefix() {
     assert!((json["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-6);
 }
 
+/// A content list reaches the engine as a list. SilkAI used to keep the text
+/// parts and drop the rest, which handed a vision model a prompt with no
+/// image and got back a confident guess instead of an answer.
+#[tokio::test]
+async fn vllm_forwards_image_parts() {
+    let (url, log) = spawn_mock().await;
+    let e = VllmEngine::new("write", 28.0, &url);
+    e.load("Qwen/Qwen3-VL", 0).await.unwrap();
+    let parts = vec![
+        serde_json::json!({"type": "text", "text": "what colour?"}),
+        serde_json::json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}),
+    ];
+    let mut rx = e
+        .run(
+            &[ChatMessage::user(parts)],
+            "",
+            &RunOptions::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    while rx.recv().await.is_some() {}
+    assert!(logged(&log, "what colour?"));
+    assert!(logged(&log, "image_url"));
+    assert!(logged(&log, "data:image/png;base64,AAAA"));
+}
+
 #[tokio::test]
 async fn vllm_run_without_load_is_not_loaded() {
     let (url, _) = spawn_mock().await;

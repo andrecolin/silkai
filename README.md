@@ -216,7 +216,8 @@ numbers.
 
 `POST /v1/chat/completions` takes the OpenAI shape. The whole `messages`
 list reaches the engine, so system prompts and history work; `content` may
-be a string or a list of text parts; `max_tokens`, `temperature`, and
+be a string or a list of content parts, forwarded as it arrived so an image
+part reaches a model that can read one; `max_tokens`, `temperature`, and
 `"stream": true` are honoured. Replies carry `id`, `model`, `created`, and
 `finish_reason`; streams open with a role chunk and end with a stop chunk
 then `[DONE]`. The official SDKs work as they are:

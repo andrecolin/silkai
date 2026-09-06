@@ -15,37 +15,94 @@ pub use ollama::OllamaEngine;
 pub use process::ProcessEngine;
 pub use vllm::VllmEngine;
 
+use std::borrow::Cow;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// What one turn says. A client sends either a plain string or a list of
+/// OpenAI content parts, and a list may hold an image alongside the text.
+/// Both shapes are kept as they arrived and serialized back unchanged, so an
+/// engine that understands images is handed them. [`Content::text`] is the
+/// projection for engines whose wire format has no place for parts.
+///
+/// Untagged: a JSON string deserializes to `Text`, a JSON array to `Parts`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Content {
+    Text(String),
+    Parts(Vec<serde_json::Value>),
+}
+
+impl Content {
+    /// This content as plain text: the string itself, or the `text` fields of
+    /// the parts joined in order. A part carrying no text — an image — adds
+    /// nothing, so a message that is only an image projects to `""`.
+    pub fn text(&self) -> Cow<'_, str> {
+        match self {
+            Content::Text(s) => Cow::Borrowed(s),
+            Content::Parts(parts) => Cow::Owned(
+                parts
+                    .iter()
+                    .filter_map(|p| p.get("text")?.as_str())
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+        }
+    }
+
+    /// Whether this is a list of parts rather than a plain string.
+    pub fn is_parts(&self) -> bool {
+        matches!(self, Content::Parts(_))
+    }
+}
+
+impl From<String> for Content {
+    fn from(s: String) -> Self {
+        Content::Text(s)
+    }
+}
+
+impl From<&str> for Content {
+    fn from(s: &str) -> Self {
+        Content::Text(s.to_string())
+    }
+}
+
+impl From<Vec<serde_json::Value>> for Content {
+    fn from(parts: Vec<serde_json::Value>) -> Self {
+        Content::Parts(parts)
+    }
+}
+
 /// One turn of an OpenAI-style chat: `system`, `user`, `assistant`, or
 /// whatever role the engine's template understands. The whole list reaches
 /// the engine; SilkAI never collapses it to a single string.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    pub content: Content,
 }
 
 impl ChatMessage {
-    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn new(role: impl Into<String>, content: impl Into<Content>) -> Self {
         Self {
             role: role.into(),
             content: content.into(),
         }
     }
 
-    pub fn system(content: impl Into<String>) -> Self {
+    pub fn system(content: impl Into<Content>) -> Self {
         Self::new("system", content)
     }
 
-    pub fn user(content: impl Into<String>) -> Self {
+    pub fn user(content: impl Into<Content>) -> Self {
         Self::new("user", content)
     }
 
-    pub fn assistant(content: impl Into<String>) -> Self {
+    pub fn assistant(content: impl Into<Content>) -> Self {
         Self::new("assistant", content)
     }
 }
@@ -60,8 +117,11 @@ pub struct RunOptions {
 
 /// The text a plain completion engine sees: the last message's content.
 /// Used by engines that have no chat template of their own.
-pub fn last_content(messages: &[ChatMessage]) -> &str {
-    messages.last().map(|m| m.content.as_str()).unwrap_or("")
+pub fn last_content(messages: &[ChatMessage]) -> Cow<'_, str> {
+    messages
+        .last()
+        .map(|m| m.content.text())
+        .unwrap_or(Cow::Borrowed(""))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -106,5 +166,58 @@ pub trait Engine: Send + Sync {
     /// attribute what the card measures.
     fn pid(&self) -> Option<u32> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_content_borrows_its_string() {
+        let c = Content::Text("hello".into());
+        assert_eq!(c.text(), "hello");
+        assert!(!c.is_parts());
+    }
+
+    #[test]
+    fn parts_project_to_their_joined_text() {
+        let c = Content::Parts(vec![
+            serde_json::json!({"type": "text", "text": "hel"}),
+            serde_json::json!({"type": "image_url", "image_url": {"url": "data:,"}}),
+            serde_json::json!({"type": "text", "text": "lo"}),
+        ]);
+        assert_eq!(c.text(), "hello");
+        assert!(c.is_parts());
+    }
+
+    /// A message that is only an image has no text to give a plain-string
+    /// engine, and must not panic reaching for one.
+    #[test]
+    fn image_only_parts_project_to_empty() {
+        let c = Content::Parts(vec![serde_json::json!({"type": "image_url"})]);
+        assert_eq!(c.text(), "");
+    }
+
+    #[test]
+    fn string_and_list_round_trip_unchanged() {
+        for raw in [
+            r#"{"role":"user","content":"hello"}"#,
+            r#"{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:,"}}]}"#,
+        ] {
+            let m: ChatMessage = serde_json::from_str(raw).unwrap();
+            let back = serde_json::to_value(&m).unwrap();
+            assert_eq!(
+                back,
+                serde_json::from_str::<serde_json::Value>(raw).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn last_content_reads_the_final_turn() {
+        let msgs = vec![ChatMessage::system("be terse"), ChatMessage::user("hello")];
+        assert_eq!(last_content(&msgs), "hello");
+        assert_eq!(last_content(&[]), "");
     }
 }
