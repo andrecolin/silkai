@@ -107,6 +107,55 @@ impl ChatMessage {
     }
 }
 
+/// What an engine sends back while it runs: the text as it arrives, then at
+/// most one `End` saying how the run finished. An engine that reports
+/// neither a reason nor a count sends only `Token`s, and the server falls
+/// back to `"stop"` with no usage — what every reply carried before engines
+/// could say otherwise.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Chunk {
+    Token(String),
+    End(RunEnd),
+}
+
+impl Chunk {
+    /// The text of a token chunk. `End` carries none.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Chunk::Token(t) => Some(t),
+            Chunk::End(_) => None,
+        }
+    }
+}
+
+/// What the engine said once generation stopped. Both fields are optional:
+/// an engine reports what it knows and nothing more.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunEnd {
+    /// The engine's own reason — `"stop"`, `"length"`, and so on. Passed
+    /// through rather than interpreted, since only the engine knows why it
+    /// stopped.
+    pub finish_reason: Option<String>,
+    pub usage: Option<Usage>,
+}
+
+impl RunEnd {
+    pub fn reason(reason: impl Into<String>) -> Self {
+        Self {
+            finish_reason: Some(reason.into()),
+            usage: None,
+        }
+    }
+}
+
+/// Tokens counted for one run, as the engine counted them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
 /// Per-request generation settings, taken from the OpenAI-style body.
 /// `None` means the engine's own default.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -152,7 +201,7 @@ pub trait Engine: Send + Sync {
         prefix: &str,
         opts: &RunOptions,
         cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<String>, EngineError>;
+    ) -> Result<mpsc::Receiver<Chunk>, EngineError>;
     fn measured_vram_gb(&self) -> f64;
 
     /// Whether `sleep` keeps a copy in host RAM that `wake` restores without

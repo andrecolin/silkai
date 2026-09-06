@@ -219,8 +219,11 @@ list reaches the engine, so system prompts and history work; `content` may
 be a string or a list of content parts, forwarded as it arrived so an image
 part reaches a model that can read one; `max_tokens`, `temperature`, and
 `"stream": true` are honoured. Replies carry `id`, `model`, `created`, and
-`finish_reason`; streams open with a role chunk and end with a stop chunk
-then `[DONE]`. The official SDKs work as they are:
+`finish_reason` — the engine's own, so a reply cut off by `max_tokens` says
+`length` and not `stop` — and `usage` when the engine counted it. Streams
+open with a role chunk, close with a chunk carrying the finish reason, then
+a usage chunk if there is one, then `[DONE]`. The official SDKs work as
+they are:
 
 ```python
 from openai import OpenAI
@@ -232,14 +235,20 @@ client.chat.completions.create(model="soap", messages=[{"role": "user", "content
 the body: an unknown model is 404, a disabled one 400, a prompt the engine
 cannot take (too long for its window) 400, an engine failure 500. If an
 engine fails, that job fails, the copy is marked not resident, and the next
-request loads it again; the daemon stays up. A request preempted mid-stream
+request loads it again; the daemon stays up.
+
+A job that was preempted mid-stream and resumed reports its finish reason
+but no usage: the engine counted only the run that finished, whose prompt
+carries the text already streamed and whose completion is just the
+remainder. A count that does not describe the request is worse than none. A request preempted mid-stream
 resumes from the tokens already sent; the client never sees a prefix twice.
 
 **Sessions.** Any model with `transport = "websocket"` or `"both"` takes
 `GET /v1/session?model=whisper`. The socket says `queued`, then `live`; from
 then on the model stays on the card until the socket closes or goes idle.
 Send `{"type":"prompt","content":"..."}` (or `"messages": [...]` with
-`max_tokens` / `temperature`) and read `token` messages until `done`. The
+`max_tokens` / `temperature`) and read `token` messages until `done`, which
+carries `finish_reason` and `usage` when the engine reported them. The
 app decides what to do with the text next; SilkAI does not chain models.
 
 A session that only pins a model has nothing to send. Hold it open with a

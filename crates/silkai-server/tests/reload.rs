@@ -74,8 +74,8 @@ async fn unchanged_models_stay_where_they_are() {
         .await
         .unwrap();
     let mut out = String::new();
-    while let Some(t) = rx.recv().await {
-        out.push_str(&t);
+    while let Some(c) = rx.recv().await {
+        out.push_str(c.text().unwrap_or_default());
     }
     again.finished(job).await;
     assert_eq!(out, "again world");

@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::Inner;
-use crate::{last_content, ChatMessage, EngineError, RunOptions};
+use crate::{last_content, ChatMessage, Chunk, EngineError, RunEnd, RunOptions, Usage};
 
 const GPU_SHELF: u32 = 0;
 const GPU_BENCH: u32 = 1000;
@@ -38,7 +38,7 @@ pub fn start_run(
     prefix: String,
     opts: RunOptions,
     cancel: CancellationToken,
-) -> Result<mpsc::Receiver<String>, EngineError> {
+) -> Result<mpsc::Receiver<Chunk>, EngineError> {
     // Render and size the prompt now, so a request that cannot fit is
     // refused with a reason instead of an empty answer later.
     let tokens = {
@@ -129,7 +129,7 @@ fn generate(
     inner: &Mutex<Inner>,
     tokens: &[LlamaToken],
     opts: &RunOptions,
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<Chunk>,
     cancel: CancellationToken,
 ) -> Result<(), EngineError> {
     let g = inner.lock().expect("llama engine mutex");
@@ -179,7 +179,7 @@ fn sample_loop(
     mut batch: LlamaBatch<'_>,
     prompt_len: usize,
     opts: &RunOptions,
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<Chunk>,
     cancel: CancellationToken,
 ) -> Result<(), EngineError> {
     let mut sampler = sampler_for(opts);
@@ -192,13 +192,33 @@ fn sample_loop(
         .unwrap_or(room);
     let mut pos = prompt_len;
     let mut produced = 0;
+    // Ends of its own accord (end-of-generation, or the receiver went away)
+    // rather than by running out of room.
+    let mut stopped = false;
     while produced < limit && !cancel.is_cancelled() {
         if !emit_next(model, ctx, &mut batch, &mut sampler, pos, &tx)? {
+            stopped = true;
             break;
         }
         pos += 1;
         produced += 1;
     }
+    // A cancelled run is preempted, not finished: the job resumes from the
+    // tokens already sent, so it has no end to report.
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+    // This engine samples the tokens itself, so the counts are exact and the
+    // reason is known: it either met an end-of-generation token or filled
+    // the room it was given.
+    let _ = tx.blocking_send(Chunk::End(RunEnd {
+        finish_reason: Some(if stopped { "stop" } else { "length" }.into()),
+        usage: Some(Usage {
+            prompt_tokens: prompt_len as u32,
+            completion_tokens: produced as u32,
+            total_tokens: (prompt_len + produced) as u32,
+        }),
+    }));
     Ok(())
 }
 
@@ -208,7 +228,7 @@ fn emit_next(
     batch: &mut LlamaBatch<'_>,
     sampler: &mut LlamaSampler,
     pos: usize,
-    tx: &mpsc::Sender<String>,
+    tx: &mpsc::Sender<Chunk>,
 ) -> Result<bool, EngineError> {
     let token = sampler.sample(ctx, batch.n_tokens() - 1);
     sampler.accept(token);
@@ -227,13 +247,13 @@ fn emit_next(
 fn send_piece(
     model: &LlamaModel,
     token: LlamaToken,
-    tx: &mpsc::Sender<String>,
+    tx: &mpsc::Sender<Chunk>,
 ) -> Result<bool, EngineError> {
     #[allow(deprecated)]
     let piece = model
         .token_to_str(token, llama_cpp_2::model::Special::Plaintext)
         .map_err(other)?;
-    Ok(tx.blocking_send(piece).is_ok())
+    Ok(tx.blocking_send(Chunk::Token(piece)).is_ok())
 }
 
 fn backend() -> Result<&'static LlamaBackend, EngineError> {

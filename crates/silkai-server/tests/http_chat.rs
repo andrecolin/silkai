@@ -322,6 +322,22 @@ async fn completion_carries_openai_fields() {
     assert_eq!(v["choices"][0]["message"]["content"], "hello world");
 }
 
+/// A reply carries the counts the engine reported. Before this, `usage` was
+/// never sent at all, so a client had no way to know what a request cost.
+#[tokio::test]
+async fn completion_carries_usage() {
+    let app = test_app().await;
+    let res = app.oneshot(chat("soap", false)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["usage"]["prompt_tokens"], 7);
+    assert_eq!(v["usage"]["completion_tokens"], 3);
+    assert_eq!(v["usage"]["total_tokens"], 10);
+}
+
 #[tokio::test]
 async fn stream_has_role_chunk_then_stop_then_done() {
     let app = test_app().await;
@@ -340,10 +356,21 @@ async fn stream_has_role_chunk_then_stop_then_done() {
     assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
     assert_eq!(chunks[0]["model"], "soap");
     assert_eq!(chunks[0]["object"], "chat.completion.chunk");
+    // The closing chunk carries the reason and an empty delta; the usage
+    // chunk follows it, as OpenAI streams them.
+    let close = chunks
+        .iter()
+        .position(|c| !c["choices"][0]["finish_reason"].is_null())
+        .expect("a chunk carrying a finish reason");
+    assert_eq!(chunks[close]["choices"][0]["finish_reason"], "stop");
+    assert!(chunks[close]["choices"][0]["delta"]
+        .as_object()
+        .unwrap()
+        .is_empty());
     let last = chunks.last().unwrap();
-    assert_eq!(last["choices"][0]["finish_reason"], "stop");
-    assert!(last["choices"][0]["delta"].as_object().unwrap().is_empty());
-    let content: String = chunks[1..chunks.len() - 1]
+    assert_eq!(last["choices"].as_array().unwrap().len(), 0);
+    assert_eq!(last["usage"]["completion_tokens"], 3);
+    let content: String = chunks[1..close]
         .iter()
         .map(|c| c["choices"][0]["delta"]["content"].as_str().unwrap_or(""))
         .collect();

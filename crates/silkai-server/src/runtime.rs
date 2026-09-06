@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
 use silkai_adapters::{
-    ChatMessage, Engine, EngineError, FakeEngine, LlamaEngine, OllamaEngine, ProcessEngine,
-    RunOptions, VllmEngine,
+    ChatMessage, Chunk, Engine, EngineError, FakeEngine, LlamaEngine, OllamaEngine, ProcessEngine,
+    RunEnd, RunOptions, VllmEngine,
 };
 use silkai_sched::{
     Action, JobId, RejectReason, SchedError, Scheduler, StatusSnapshot, SubmitResult,
@@ -44,7 +44,11 @@ struct Waiter {
     messages: Vec<ChatMessage>,
     opts: RunOptions,
     emitted: String,
-    tx: mpsc::Sender<String>,
+    /// Set once this job has been preempted and restarted from `emitted`.
+    /// The engine's counts then cover only the last run, so they are dropped
+    /// rather than reported wrong.
+    resumed: bool,
+    tx: mpsc::Sender<Chunk>,
 }
 
 struct Inner {
@@ -216,7 +220,7 @@ impl Runtime {
         model: &str,
         messages: Vec<ChatMessage>,
         opts: RunOptions,
-    ) -> Result<(JobId, mpsc::Receiver<String>), RuntimeError> {
+    ) -> Result<(JobId, mpsc::Receiver<Chunk>), RuntimeError> {
         self.ensure_enabled(model)?;
         self.ensure_available(model)?;
         let (tx, rx) = mpsc::channel(16);
@@ -284,7 +288,7 @@ impl Runtime {
         model: &str,
         messages: &[ChatMessage],
         opts: &RunOptions,
-    ) -> Result<mpsc::Receiver<String>, RuntimeError> {
+    ) -> Result<mpsc::Receiver<Chunk>, RuntimeError> {
         if !self.sessions().contains_key(&job_id) {
             return Err(RuntimeError::Unknown);
         }
@@ -460,7 +464,7 @@ impl Runtime {
         model: &str,
         messages: Vec<ChatMessage>,
         opts: RunOptions,
-        tx: mpsc::Sender<String>,
+        tx: mpsc::Sender<Chunk>,
     ) -> Result<JobId, RuntimeError> {
         let (job_id, actions) = {
             let mut sched = self.inner.scheduler.lock().await;
@@ -557,13 +561,14 @@ impl Runtime {
         model: &str,
         messages: Vec<ChatMessage>,
         opts: RunOptions,
-        tx: mpsc::Sender<String>,
+        tx: mpsc::Sender<Chunk>,
     ) {
         let waiter = Waiter {
             model: model.to_string(),
             messages,
             opts,
             emitted: String::new(),
+            resumed: false,
             tx,
         };
         self.inner.waiters.lock().await.insert(job_id, waiter);
@@ -572,7 +577,7 @@ impl Runtime {
     async fn waiter(
         &self,
         job_id: JobId,
-    ) -> Option<(Vec<ChatMessage>, String, RunOptions, mpsc::Sender<String>)> {
+    ) -> Option<(Vec<ChatMessage>, String, RunOptions, mpsc::Sender<Chunk>)> {
         self.inner.waiters.lock().await.get(&job_id).map(|w| {
             (
                 w.messages.clone(),
@@ -590,6 +595,35 @@ impl Runtime {
             .await
             .get(&job_id)
             .map(|w| w.model.clone())
+    }
+
+    /// Note that this job is starting again from text already sent, so the
+    /// counts the engine reports at the end will not describe the whole run.
+    async fn mark_resumed(&self, job_id: JobId) {
+        if let Some(w) = self.inner.waiters.lock().await.get_mut(&job_id) {
+            w.resumed = true;
+        }
+    }
+
+    /// The end as the client should see it. A job that ran once is reported
+    /// as the engine reported it. A job that was preempted and resumed keeps
+    /// its finish reason — the last run is the one that ended it — but loses
+    /// the usage: the engine counted one run, whose prompt now carries the
+    /// text already streamed and whose completion is only the remainder, and
+    /// a wrong count is worse than none.
+    async fn settle_end(&self, job_id: JobId, end: RunEnd) -> RunEnd {
+        let resumed = self
+            .inner
+            .waiters
+            .lock()
+            .await
+            .get(&job_id)
+            .is_some_and(|w| w.resumed);
+        if resumed {
+            RunEnd { usage: None, ..end }
+        } else {
+            end
+        }
     }
 
     async fn append_emitted(&self, job_id: JobId, chunk: &str) {
@@ -807,6 +841,9 @@ impl Runtime {
         let Some((messages, prefix, opts, tx)) = self.waiter(job_id).await else {
             return Ok(());
         };
+        if !prefix.is_empty() {
+            self.mark_resumed(job_id).await;
+        }
         let token = self.watch(job_id).await;
         let engine = Arc::clone(self.engine(model)?);
         let rx = match engine.run(&messages, &prefix, &opts, token.clone()).await {
@@ -865,8 +902,8 @@ impl Runtime {
 
 async fn forward_job(
     job_id: JobId,
-    rx: mpsc::Receiver<String>,
-    tx: mpsc::Sender<String>,
+    rx: mpsc::Receiver<Chunk>,
+    tx: mpsc::Sender<Chunk>,
     token: CancellationToken,
     rt: Runtime,
 ) {
@@ -890,8 +927,8 @@ async fn apply_loop(weak: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Vec<Actio
 
 async fn pump_tokens(
     job_id: JobId,
-    mut rx: mpsc::Receiver<String>,
-    tx: mpsc::Sender<String>,
+    mut rx: mpsc::Receiver<Chunk>,
+    tx: mpsc::Sender<Chunk>,
     token: CancellationToken,
     rt: &Runtime,
 ) {
@@ -899,9 +936,15 @@ async fn pump_tokens(
         tokio::select! {
             _ = token.cancelled() => return,
             next = rx.recv() => match next {
-                Some(chunk) => {
-                    rt.append_emitted(job_id, &chunk).await;
-                    if tx.send(chunk).await.is_err() {
+                Some(Chunk::Token(text)) => {
+                    rt.append_emitted(job_id, &text).await;
+                    if tx.send(Chunk::Token(text)).await.is_err() {
+                        return;
+                    }
+                }
+                Some(Chunk::End(end)) => {
+                    let end = rt.settle_end(job_id, end).await;
+                    if tx.send(Chunk::End(end)).await.is_err() {
                         return;
                     }
                 }
