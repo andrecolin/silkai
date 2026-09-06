@@ -233,6 +233,10 @@ struct ChatRequest {
     max_tokens: Option<u32>,
     #[serde(default)]
     temperature: Option<f32>,
+    #[serde(default)]
+    tools: Option<serde_json::Value>,
+    #[serde(default)]
+    tool_choice: Option<serde_json::Value>,
 }
 
 impl ChatRequest {
@@ -240,6 +244,8 @@ impl ChatRequest {
         RunOptions {
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            tools: self.tools.clone(),
+            tool_choice: self.tool_choice.clone(),
         }
     }
 }
@@ -255,6 +261,12 @@ struct WireMessage {
     role: String,
     #[serde(default)]
     content: serde_json::Value,
+    #[serde(default)]
+    tool_calls: Option<serde_json::Value>,
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 fn default_role() -> String {
@@ -263,7 +275,12 @@ fn default_role() -> String {
 
 impl WireMessage {
     fn into_chat(self) -> ChatMessage {
-        ChatMessage::new(self.role, content_of(self.content))
+        ChatMessage {
+            tool_calls: self.tool_calls,
+            tool_call_id: self.tool_call_id,
+            name: self.name,
+            ..ChatMessage::new(self.role, content_of(self.content))
+        }
     }
 }
 
@@ -377,11 +394,15 @@ async fn stream_or_timeout(rt: &Runtime, meta: Meta, mut rx: mpsc::Receiver<Chun
 
 async fn json_or_timeout(rt: &Runtime, meta: Meta, rx: mpsc::Receiver<Chunk>) -> Response {
     match tokio::time::timeout(rt.request_timeout(), collect_run(rx)).await {
-        Ok((tokens, reasoning, end)) if tokens.is_empty() => match rt.take_rejection(meta.job) {
-            Some(reason) => (StatusCode::BAD_REQUEST, reason).into_response(),
-            None => json_completion(&meta, &tokens, &reasoning, &end),
-        },
-        Ok((tokens, reasoning, end)) => json_completion(&meta, &tokens, &reasoning, &end),
+        // A run that produced no text and no tool call is the empty answer a
+        // rejection hides behind; one that asked for a tool is complete.
+        Ok(c) if c.tokens.is_empty() && c.tool_calls.is_empty() => {
+            match rt.take_rejection(meta.job) {
+                Some(reason) => (StatusCode::BAD_REQUEST, reason).into_response(),
+                None => json_completion(&meta, &c),
+            }
+        }
+        Ok(c) => json_completion(&meta, &c),
         Err(_) => timeout_drop(rt, meta.job).await,
     }
 }
@@ -393,19 +414,69 @@ async fn timeout_drop(rt: &Runtime, job: JobId) -> Response {
 
 /// Drains a finished job: the text it produced, and whatever the engine
 /// said about how it ended.
-async fn collect_run(mut rx: mpsc::Receiver<Chunk>) -> (Vec<String>, Vec<String>, RunEnd) {
-    let mut tokens = Vec::new();
-    let mut reasoning = Vec::new();
-    let mut end = RunEnd::default();
+async fn collect_run(mut rx: mpsc::Receiver<Chunk>) -> Collected {
+    let mut c = Collected::default();
     while let Some(chunk) = rx.recv().await {
         match chunk {
-            Chunk::Token(t) => tokens.push(t),
-            Chunk::Reasoning(t) => reasoning.push(t),
-            Chunk::End(e) => end = e,
+            Chunk::Token(t) => c.tokens.push(t),
+            Chunk::Reasoning(t) => c.reasoning.push(t),
+            Chunk::ToolCalls(v) => merge_tool_calls(&mut c.tool_calls, v),
+            Chunk::End(e) => c.end = e,
             Chunk::Reject(_) => {}
         }
     }
-    (tokens, reasoning, end)
+    c
+}
+
+#[derive(Default)]
+struct Collected {
+    tokens: Vec<String>,
+    reasoning: Vec<String>,
+    /// Assembled tool calls, in the order their indices first appeared.
+    tool_calls: Vec<serde_json::Value>,
+    end: RunEnd,
+}
+
+/// Fold one `delta.tool_calls` fragment into the calls assembled so far.
+///
+/// A streaming engine splits each call across fragments: the first carries the
+/// id and function name, later ones carry more of the `arguments` string. The
+/// non-streaming reply has to present them whole, so the fragments are merged
+/// on `index` — appending arguments, and taking every other field the first
+/// time it appears.
+fn merge_tool_calls(into: &mut Vec<serde_json::Value>, fragment: serde_json::Value) {
+    let Some(items) = fragment.as_array() else { return };
+    for item in items {
+        let idx = item.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+        if into.len() <= idx {
+            into.resize(idx + 1, serde_json::json!({}));
+        }
+        let slot = &mut into[idx];
+        for (key, value) in item.as_object().into_iter().flatten() {
+            if key == "index" {
+                continue;
+            }
+            if key == "function" {
+                let f = slot
+                    .as_object_mut()
+                    .expect("tool call slot is an object")
+                    .entry("function")
+                    .or_insert_with(|| serde_json::json!({}));
+                for (fk, fv) in value.as_object().into_iter().flatten() {
+                    if fk == "arguments" {
+                        // The one field that accumulates rather than replaces.
+                        let acc = f["arguments"].as_str().unwrap_or("").to_string();
+                        f["arguments"] =
+                            serde_json::json!(acc + fv.as_str().unwrap_or(""));
+                    } else {
+                        f[fk] = fv.clone();
+                    }
+                }
+            } else {
+                slot[key] = value.clone();
+            }
+        }
+    }
 }
 
 /// The stream: a `: queued` comment, a role chunk, one chunk per token, a
@@ -499,6 +570,16 @@ async fn token_or_stop(
                 rx,
             },
         )),
+        // Passed on as the engine framed it, fragments and all: assembling
+        // them here would only force the client to take them apart again.
+        Some(Chunk::ToolCalls(calls)) => Some((
+            Event::default().data(chunk_json(&meta, Delta::ToolCalls(&calls), None)),
+            SsePhase::Tokens {
+                meta,
+                pending: None,
+                rx,
+            },
+        )),
         // `End` is the last thing an engine sends, so the stream closes on it
         // rather than waiting for the channel to drop.
         Some(Chunk::End(end)) => Some(close(meta, end)),
@@ -537,6 +618,7 @@ enum Delta<'a> {
     Role,
     Content(&'a str),
     Reasoning(&'a str),
+    ToolCalls(&'a serde_json::Value),
     Empty,
 }
 
@@ -545,6 +627,7 @@ fn chunk_json(meta: &Meta, delta: Delta<'_>, finish: Option<&str>) -> String {
         Delta::Role => serde_json::json!({"role": "assistant", "content": ""}),
         Delta::Content(text) => serde_json::json!({"content": text}),
         Delta::Reasoning(text) => serde_json::json!({"reasoning_content": text}),
+        Delta::ToolCalls(calls) => serde_json::json!({"tool_calls": calls}),
         Delta::Empty => serde_json::json!({}),
     };
     serde_json::json!({
@@ -561,12 +644,8 @@ fn chunk_json(meta: &Meta, delta: Delta<'_>, finish: Option<&str>) -> String {
     .to_string()
 }
 
-fn json_completion(
-    meta: &Meta,
-    tokens: &[String],
-    reasoning: &[String],
-    end: &RunEnd,
-) -> Response {
+fn json_completion(meta: &Meta, c: &Collected) -> Response {
+    let (tokens, reasoning, end) = (&c.tokens, &c.reasoning, &c.end);
     let mut body = serde_json::json!({
         "id": meta.id,
         "object": "chat.completion",
@@ -591,6 +670,9 @@ fn json_completion(
     if !reasoning.is_empty() {
         body["choices"][0]["message"]["reasoning_content"] =
             serde_json::json!(reasoning.concat());
+    }
+    if !c.tool_calls.is_empty() {
+        body["choices"][0]["message"]["tool_calls"] = serde_json::json!(c.tool_calls);
     }
     Json(body).into_response()
 }
@@ -687,5 +769,81 @@ fn fake_model(spec: silkai_sched::ModelSpec) -> crate::config::ConfiguredModel {
         idle_timeout_secs: None,
         ctx_size: None,
         spec,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_call_fragments_assemble_into_whole_calls() {
+        // The shape a streaming engine actually sends: the name first, then the
+        // arguments string in pieces. A non-streaming reply owes the client one
+        // whole call, so the pieces are joined rather than overwriting.
+        let mut calls = Vec::new();
+        merge_tool_calls(
+            &mut calls,
+            serde_json::json!([{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {"name": "run_sql", "arguments": ""}
+            }]),
+        );
+        merge_tool_calls(
+            &mut calls,
+            serde_json::json!([{"index": 0, "function": {"arguments": "{\"sql\":"}}]),
+        );
+        merge_tool_calls(
+            &mut calls,
+            serde_json::json!([{"index": 0, "function": {"arguments": "\"SELECT 1\"}"}}]),
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "call_1");
+        assert_eq!(calls[0]["function"]["name"], "run_sql");
+        assert_eq!(calls[0]["function"]["arguments"], "{\"sql\":\"SELECT 1\"}");
+    }
+
+    #[test]
+    fn parallel_tool_calls_stay_separate() {
+        // Two calls in one turn arrive interleaved. Keeping them apart by index
+        // is what stops one corrupt call being handed back instead of two.
+        let mut calls = Vec::new();
+        merge_tool_calls(
+            &mut calls,
+            serde_json::json!([
+                {"index": 0, "id": "a", "function": {"name": "first", "arguments": "{\"x\":"}},
+                {"index": 1, "id": "b", "function": {"name": "second", "arguments": "{\"y\":"}}
+            ]),
+        );
+        merge_tool_calls(
+            &mut calls,
+            serde_json::json!([
+                {"index": 1, "function": {"arguments": "2}"}},
+                {"index": 0, "function": {"arguments": "1}"}}
+            ]),
+        );
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["function"]["arguments"], "{\"x\":1}");
+        assert_eq!(calls[1]["function"]["arguments"], "{\"y\":2}");
+    }
+
+    #[test]
+    fn a_tool_message_round_trips_its_call_id() {
+        // The turn that answers a call has to carry the id back, or the engine
+        // cannot match the result to the request it made.
+        let wire: WireMessage = serde_json::from_value(serde_json::json!({
+            "role": "tool", "content": "42", "tool_call_id": "call_1"
+        }))
+        .expect("a tool turn");
+        let chat = wire.into_chat();
+        assert_eq!(chat.role, "tool");
+        assert_eq!(chat.tool_call_id.as_deref(), Some("call_1"));
+        // And it survives serialization back to the engine.
+        let sent = serde_json::to_value(&chat).expect("serializable");
+        assert_eq!(sent["tool_call_id"], "call_1");
+        // A message with no tool fields must not grow empty ones.
+        let plain = serde_json::to_value(ChatMessage::user("hi")).expect("serializable");
+        assert!(plain.get("tool_call_id").is_none(), "absent stays absent: {plain}");
+        assert!(plain.get("tool_calls").is_none(), "absent stays absent: {plain}");
     }
 }

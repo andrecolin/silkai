@@ -34,6 +34,10 @@ struct ClientMsg {
     max_tokens: Option<u32>,
     #[serde(default)]
     temperature: Option<f32>,
+    #[serde(default)]
+    tools: Option<serde_json::Value>,
+    #[serde(default)]
+    tool_choice: Option<serde_json::Value>,
 }
 
 impl ClientMsg {
@@ -41,6 +45,8 @@ impl ClientMsg {
         let opts = RunOptions {
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            tools: self.tools,
+            tool_choice: self.tool_choice,
         };
         let messages = if self.messages.is_empty() {
             vec![ChatMessage::user(self.content)]
@@ -63,6 +69,8 @@ struct ServerMsg<'a> {
     finish_reason: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<Usage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<&'a serde_json::Value>,
 }
 
 pub async fn session(
@@ -171,6 +179,7 @@ async fn stream_prompt(
             Chunk::Reasoning(text) => {
                 send_json(socket, "reasoning", Some(&text), None).await?
             }
+            Chunk::ToolCalls(calls) => send_tool_calls(socket, &calls).await?,
             Chunk::End(e) => end = e,
             Chunk::Reject(_) => {}
         }
@@ -190,6 +199,27 @@ async fn send_done(socket: &mut WebSocket, end: &RunEnd) -> Result<(), RuntimeEr
             message: None,
             finish_reason: end.finish_reason.as_deref(),
             usage: end.usage,
+            tool_calls: None,
+        },
+    )
+    .await
+}
+
+/// One `tool_calls` fragment, framed as the engine sent it. A session client
+/// assembles the fragments the same way an HTTP streaming client does.
+async fn send_tool_calls(
+    socket: &mut WebSocket,
+    calls: &serde_json::Value,
+) -> Result<(), RuntimeError> {
+    send_msg(
+        socket,
+        ServerMsg {
+            kind: "tool_calls",
+            text: None,
+            message: None,
+            finish_reason: None,
+            usage: None,
+            tool_calls: Some(calls),
         },
     )
     .await
@@ -209,6 +239,7 @@ async fn send_json(
             message,
             finish_reason: None,
             usage: None,
+            tool_calls: None,
         },
     )
     .await
