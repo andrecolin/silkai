@@ -36,7 +36,11 @@ fi
 
 if command -v systemctl >/dev/null 2>&1; then
   mkdir -p "$unit_dir"
-  sed "s|@BIN@|$bin|g" "$root/contrib/systemd/silkai.service" >"$unit_dir/silkai.service"
+  # The unit names its own PATH so a lingering, session-less user manager
+  # finds llama-server where this script put silkai.
+  path_dirs="$prefix/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  sed -e "s|@BIN@|$bin|g" -e "s|@PATHDIRS@|$path_dirs|g" \
+    "$root/contrib/systemd/silkai.service" >"$unit_dir/silkai.service"
   systemctl --user daemon-reload
   echo "systemd unit: $unit_dir/silkai.service"
   echo "Start with:  systemctl --user enable --now silkai"

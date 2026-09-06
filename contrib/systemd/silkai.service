@@ -4,10 +4,22 @@ After=network.target
 
 [Service]
 Type=simple
+# Engine commands are looked up on this PATH: `cmd = ["llama-server", ...]`
+# is resolved by the daemon's own environment, not by any login shell.
+#
+# A user manager started from a graphical login inherits that session's PATH,
+# which usually has ~/.local/bin in it. One started by lingering at boot —
+# the headless case, and the one `loginctl enable-linger` is for — does not:
+# it gets /etc/environment, where ~/.local/bin is normally absent. Naming the
+# directories here makes the service behave the same either way.
+#
+# scripts/install.sh substitutes the prefix it installed into. Editing this
+# file by hand, put that directory first.
+Environment=PATH=@PATHDIRS@
+Environment=SILKAI_CONFIG=%h/.config/silkai/config.toml
 ExecStart=@BIN@
 Restart=on-failure
 RestartSec=2
-Environment=SILKAI_CONFIG=%h/.config/silkai/config.toml
 
 [Install]
 WantedBy=default.target
