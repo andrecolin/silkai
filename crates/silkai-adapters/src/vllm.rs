@@ -5,7 +5,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::{ChatMessage, Engine, EngineError, RunOptions};
+use crate::{ChatMessage, Chunk, Engine, EngineError, RunEnd, RunOptions, Usage};
 
 struct Inner {
     on_bench: bool,
@@ -112,7 +112,7 @@ impl Engine for VllmEngine {
         prefix: &str,
         opts: &RunOptions,
         cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<String>, EngineError> {
+    ) -> Result<mpsc::Receiver<Chunk>, EngineError> {
         if !self.on_bench() {
             return Err(EngineError::NotLoaded);
         }
@@ -152,13 +152,17 @@ async fn stream_chat(
     model: String,
     messages: Vec<ChatMessage>,
     opts: RunOptions,
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<Chunk>,
     cancel: CancellationToken,
 ) {
+    // `stream_options` is what makes an OpenAI-shaped server put a usage
+    // record in the stream; without it the counts never arrive. The finish
+    // reason rides on the last content chunk either way.
     let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
         "stream": true,
+        "stream_options": {"include_usage": true},
     });
     if let Some(m) = opts.max_tokens {
         body["max_tokens"] = serde_json::json!(m);
@@ -176,22 +180,35 @@ async fn stream_chat(
     };
     let mut resp = resp;
     let mut buf = String::new();
+    let mut end = RunEnd::default();
     loop {
-        tokio::select! {
+        let more = tokio::select! {
+            // A cancelled run is preempted, not finished: it has no end to
+            // report, and the job resumes from the tokens already sent.
             _ = cancel.cancelled() => return,
             chunk = resp.chunk() => match chunk {
-                Ok(Some(bytes)) => {
-                    if !emit_sse(&mut buf, &bytes, &tx).await {
-                        return;
-                    }
-                }
-                _ => return,
+                Ok(Some(bytes)) => emit_sse(&mut buf, &bytes, &tx, &mut end).await,
+                _ => false,
             }
+        };
+        if !more {
+            break;
         }
+    }
+    if end != RunEnd::default() {
+        let _ = tx.send(Chunk::End(end)).await;
     }
 }
 
-async fn emit_sse(buf: &mut String, bytes: &[u8], tx: &mpsc::Sender<String>) -> bool {
+/// Reads SSE lines into tokens, keeping whatever the stream says about how
+/// the run ended. Returns false once the stream is finished or the receiver
+/// is gone; `end` holds what was seen so the caller can send it last.
+async fn emit_sse(
+    buf: &mut String,
+    bytes: &[u8],
+    tx: &mpsc::Sender<Chunk>,
+    end: &mut RunEnd,
+) -> bool {
     buf.push_str(&String::from_utf8_lossy(bytes));
     while let Some(i) = buf.find('\n') {
         let mut line: String = buf.drain(..=i).collect();
@@ -208,23 +225,27 @@ async fn emit_sse(buf: &mut String, bytes: &[u8], tx: &mpsc::Sender<String>) -> 
         if data == "[DONE]" {
             return false;
         }
-        if let Some(text) = delta_content(data) {
-            if tx.send(text).await.is_err() {
+        let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) else {
+            continue;
+        };
+        // The usage record arrives in its own trailing chunk, which carries
+        // an empty `choices`, so it is read before the choices are touched.
+        if let Some(usage) = chunk.usage {
+            end.usage = Some(usage);
+        }
+        let Some(choice) = chunk.choices.into_iter().next() else {
+            continue;
+        };
+        if let Some(reason) = choice.finish_reason {
+            end.finish_reason = Some(reason);
+        }
+        if let Some(text) = choice.delta.content.filter(|t| !t.is_empty()) {
+            if tx.send(Chunk::Token(text)).await.is_err() {
                 return false;
             }
         }
     }
     true
-}
-
-fn delta_content(data: &str) -> Option<String> {
-    let chunk: StreamChunk = serde_json::from_str(data).ok()?;
-    let text = chunk.choices.into_iter().next()?.delta.content?;
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
 }
 
 fn http_err(err: reqwest::Error) -> EngineError {
@@ -235,12 +256,16 @@ fn http_err(err: reqwest::Error) -> EngineError {
 struct StreamChunk {
     #[serde(default)]
     choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Deserialize)]
 struct StreamChoice {
     #[serde(default)]
     delta: StreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Default, Deserialize)]

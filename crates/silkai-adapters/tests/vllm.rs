@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use silkai_adapters::{ChatMessage, Engine, EngineError, RunOptions, VllmEngine};
+use silkai_adapters::{ChatMessage, Chunk, Engine, EngineError, RunOptions, Usage, VllmEngine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -49,8 +49,10 @@ async fn vllm_run_streams_sse_content() {
         .await
         .unwrap();
     let mut got = Vec::new();
-    while let Some(t) = rx.recv().await {
-        got.push(t);
+    while let Some(c) = rx.recv().await {
+        if let Some(t) = c.text() {
+            got.push(t.to_string());
+        }
     }
     assert_eq!(got, vec!["hello".to_string(), " world".to_string()]);
     assert!(logged(&log, "POST /v1/chat/completions"));
@@ -125,6 +127,47 @@ async fn vllm_forwards_image_parts() {
     assert!(logged(&log, "what colour?"));
     assert!(logged(&log, "image_url"));
     assert!(logged(&log, "data:image/png;base64,AAAA"));
+}
+
+/// The reason the run stopped and the tokens it cost come back with it.
+/// SilkAI used to discard both and report every reply as a clean "stop"
+/// with no counts, so a truncated answer was indistinguishable from a
+/// complete one.
+#[tokio::test]
+async fn vllm_reports_finish_reason_and_usage() {
+    let (url, log) = spawn_mock().await;
+    let e = VllmEngine::new("write", 28.0, &url);
+    e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
+    let mut rx = e
+        .run(
+            &[ChatMessage::user("hello")],
+            "",
+            &RunOptions::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut text = String::new();
+    let mut end = None;
+    while let Some(chunk) = rx.recv().await {
+        match chunk {
+            Chunk::Token(t) => text.push_str(&t),
+            Chunk::End(e) => end = Some(e),
+        }
+    }
+    assert_eq!(text, "hello world");
+    let end = end.expect("an end chunk");
+    assert_eq!(end.finish_reason.as_deref(), Some("length"));
+    assert_eq!(
+        end.usage,
+        Some(Usage {
+            prompt_tokens: 11,
+            completion_tokens: 2,
+            total_tokens: 13,
+        })
+    );
+    // A server only sends usage when it is asked to.
+    assert!(logged(&log, "stream_options"));
 }
 
 #[tokio::test]
@@ -305,5 +348,7 @@ const CHAT_SSE: &str = concat!(
     "\r\n",
     "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
     "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+    "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":2,\"total_tokens\":13}}\n\n",
     "data: [DONE]\n\n",
 );

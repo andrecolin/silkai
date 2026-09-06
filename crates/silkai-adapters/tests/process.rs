@@ -35,8 +35,10 @@ async fn process_run_streams_after_spawn() {
         .await
         .unwrap();
     let mut got = Vec::new();
-    while let Some(t) = rx.recv().await {
-        got.push(t);
+    while let Some(c) = rx.recv().await {
+        if let Some(t) = c.text() {
+            got.push(t.to_string());
+        }
     }
     e.sleep().await.unwrap();
     assert_eq!(got, vec!["hello".to_string(), " world".to_string()]);

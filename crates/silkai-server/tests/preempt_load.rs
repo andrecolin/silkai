@@ -52,10 +52,10 @@ async fn wait_state(rt: &Runtime, name: &str, want: &str) {
     panic!("{name} never reached {want}");
 }
 
-async fn collect(mut rx: tokio::sync::mpsc::Receiver<String>) -> String {
+async fn collect(mut rx: tokio::sync::mpsc::Receiver<silkai_adapters::Chunk>) -> String {
     let mut out = String::new();
-    while let Some(t) = rx.recv().await {
-        out.push_str(&t);
+    while let Some(c) = rx.recv().await {
+        out.push_str(c.text().unwrap_or_default());
     }
     out
 }
