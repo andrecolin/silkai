@@ -35,6 +35,34 @@ async fn vllm_wake_posts_wake_up() {
 }
 
 #[tokio::test]
+async fn vllm_run_forwards_reasoning_apart_from_content() {
+    let (url, _log) = spawn_mock_serving(REASONING_SSE).await;
+    let e = VllmEngine::new("write", 28.0, &url);
+    e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
+    let mut rx = e
+        .run(
+            &[ChatMessage::user("hello")],
+            "",
+            &RunOptions::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    while let Some(c) = rx.recv().await {
+        match c {
+            Chunk::Reasoning(t) => reasoning.push_str(&t),
+            Chunk::Token(t) => content.push_str(&t),
+            Chunk::End(_) | Chunk::Reject(_) => {}
+        }
+    }
+    // The trace is delivered, and it never contaminates the answer.
+    assert_eq!(reasoning, "thinking");
+    assert_eq!(content, "hello");
+}
+
+#[tokio::test]
 async fn vllm_run_streams_sse_content() {
     let (url, log) = spawn_mock().await;
     let e = VllmEngine::new("write", 28.0, &url);
@@ -152,6 +180,7 @@ async fn vllm_reports_finish_reason_and_usage() {
     while let Some(chunk) = rx.recv().await {
         match chunk {
             Chunk::Token(t) => text.push_str(&t),
+            Chunk::Reasoning(_) => {}
             Chunk::End(e) => end = Some(e),
             Chunk::Reject(_) => {}
         }
@@ -244,6 +273,12 @@ async fn vllm_warm_does_not_hit_http() {
 }
 
 async fn spawn_mock() -> (String, Arc<Mutex<Vec<String>>>) {
+    spawn_mock_serving(CHAT_SSE).await
+}
+
+/// A mock that answers `/v1/chat/completions` with `chat`, so a test can pick
+/// the stream shape its engine is supposed to read.
+async fn spawn_mock_serving(chat: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
     let log = Arc::new(Mutex::new(Vec::new()));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -255,14 +290,18 @@ async fn spawn_mock() -> (String, Arc<Mutex<Vec<String>>>) {
             };
             let state = state.clone();
             tokio::spawn(async move {
-                handle_conn(&mut sock, &state).await;
+                handle_conn(&mut sock, &state, chat).await;
             });
         }
     });
     (format!("http://{addr}"), log)
 }
 
-async fn handle_conn(sock: &mut tokio::net::TcpStream, log: &Mutex<Vec<String>>) {
+async fn handle_conn(
+    sock: &mut tokio::net::TcpStream,
+    log: &Mutex<Vec<String>>,
+    chat: &'static str,
+) {
     let Some((method, path, body)) = read_request(sock).await else {
         return;
     };
@@ -275,7 +314,7 @@ async fn handle_conn(sock: &mut tokio::net::TcpStream, log: &Mutex<Vec<String>>)
         log.lock().expect("log").push(line);
     }
     let resp = if path.starts_with("/v1/chat/completions") {
-        CHAT_SSE
+        chat
     } else {
         OK_EMPTY
     };
@@ -341,6 +380,20 @@ fn count_logged(log: &Mutex<Vec<String>>, needle: &str) -> usize {
 }
 
 const OK_EMPTY: &str = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+/// What llama.cpp sends under `--reasoning-format deepseek`: the trace in
+/// `reasoning_content` deltas, then the answer in `content` deltas.
+const REASONING_SSE: &str = concat!(
+    "HTTP/1.1 200 OK\r\n",
+    "Content-Type: text/event-stream\r\n",
+    "Connection: close\r\n",
+    "\r\n",
+    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ing\"}}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+    "data: [DONE]\n\n",
+);
 
 const CHAT_SSE: &str = concat!(
     "HTTP/1.1 200 OK\r\n",

@@ -945,6 +945,13 @@ async fn pump_tokens(
                         return;
                     }
                 }
+                // Not recorded as emitted: a resumed job must replay the
+                // answer it had produced, not the thinking behind it.
+                Some(Chunk::Reasoning(text)) => {
+                    if tx.send(Chunk::Reasoning(text)).await.is_err() {
+                        return;
+                    }
+                }
                 Some(Chunk::End(end)) => {
                     let end = rt.settle_end(job_id, end).await;
                     if tx.send(Chunk::End(end)).await.is_err() {

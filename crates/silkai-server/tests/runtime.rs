@@ -404,6 +404,7 @@ async fn preempted_soap_does_not_replay_streamed_tokens() {
     while let Some(c) = soap_rx.recv().await {
         match c {
             Chunk::Token(t) => got.push(t),
+            Chunk::Reasoning(_) => {}
             Chunk::End(e) => end = Some(e),
             Chunk::Reject(_) => {}
         }

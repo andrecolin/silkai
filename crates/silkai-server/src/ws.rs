@@ -168,6 +168,9 @@ async fn stream_prompt(
     while let Some(chunk) = rx.recv().await {
         match chunk {
             Chunk::Token(text) => send_json(socket, "token", Some(&text), None).await?,
+            Chunk::Reasoning(text) => {
+                send_json(socket, "reasoning", Some(&text), None).await?
+            }
             Chunk::End(e) => end = e,
             Chunk::Reject(_) => {}
         }

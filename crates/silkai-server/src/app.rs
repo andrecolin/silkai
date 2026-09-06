@@ -377,11 +377,11 @@ async fn stream_or_timeout(rt: &Runtime, meta: Meta, mut rx: mpsc::Receiver<Chun
 
 async fn json_or_timeout(rt: &Runtime, meta: Meta, rx: mpsc::Receiver<Chunk>) -> Response {
     match tokio::time::timeout(rt.request_timeout(), collect_run(rx)).await {
-        Ok((tokens, end)) if tokens.is_empty() => match rt.take_rejection(meta.job) {
+        Ok((tokens, reasoning, end)) if tokens.is_empty() => match rt.take_rejection(meta.job) {
             Some(reason) => (StatusCode::BAD_REQUEST, reason).into_response(),
-            None => json_completion(&meta, &tokens, &end),
+            None => json_completion(&meta, &tokens, &reasoning, &end),
         },
-        Ok((tokens, end)) => json_completion(&meta, &tokens, &end),
+        Ok((tokens, reasoning, end)) => json_completion(&meta, &tokens, &reasoning, &end),
         Err(_) => timeout_drop(rt, meta.job).await,
     }
 }
@@ -393,17 +393,19 @@ async fn timeout_drop(rt: &Runtime, job: JobId) -> Response {
 
 /// Drains a finished job: the text it produced, and whatever the engine
 /// said about how it ended.
-async fn collect_run(mut rx: mpsc::Receiver<Chunk>) -> (Vec<String>, RunEnd) {
+async fn collect_run(mut rx: mpsc::Receiver<Chunk>) -> (Vec<String>, Vec<String>, RunEnd) {
     let mut tokens = Vec::new();
+    let mut reasoning = Vec::new();
     let mut end = RunEnd::default();
     while let Some(chunk) = rx.recv().await {
         match chunk {
             Chunk::Token(t) => tokens.push(t),
+            Chunk::Reasoning(t) => reasoning.push(t),
             Chunk::End(e) => end = e,
             Chunk::Reject(_) => {}
         }
     }
-    (tokens, end)
+    (tokens, reasoning, end)
 }
 
 /// The stream: a `: queued` comment, a role chunk, one chunk per token, a
@@ -489,6 +491,14 @@ async fn token_or_stop(
                 rx,
             },
         )),
+        Some(Chunk::Reasoning(text)) => Some((
+            Event::default().data(chunk_json(&meta, Delta::Reasoning(&text), None)),
+            SsePhase::Tokens {
+                meta,
+                pending: None,
+                rx,
+            },
+        )),
         // `End` is the last thing an engine sends, so the stream closes on it
         // rather than waiting for the channel to drop.
         Some(Chunk::End(end)) => Some(close(meta, end)),
@@ -526,6 +536,7 @@ fn usage_chunk_json(meta: &Meta, usage: Usage) -> String {
 enum Delta<'a> {
     Role,
     Content(&'a str),
+    Reasoning(&'a str),
     Empty,
 }
 
@@ -533,6 +544,7 @@ fn chunk_json(meta: &Meta, delta: Delta<'_>, finish: Option<&str>) -> String {
     let delta = match delta {
         Delta::Role => serde_json::json!({"role": "assistant", "content": ""}),
         Delta::Content(text) => serde_json::json!({"content": text}),
+        Delta::Reasoning(text) => serde_json::json!({"reasoning_content": text}),
         Delta::Empty => serde_json::json!({}),
     };
     serde_json::json!({
@@ -549,7 +561,12 @@ fn chunk_json(meta: &Meta, delta: Delta<'_>, finish: Option<&str>) -> String {
     .to_string()
 }
 
-fn json_completion(meta: &Meta, tokens: &[String], end: &RunEnd) -> Response {
+fn json_completion(
+    meta: &Meta,
+    tokens: &[String],
+    reasoning: &[String],
+    end: &RunEnd,
+) -> Response {
     let mut body = serde_json::json!({
         "id": meta.id,
         "object": "chat.completion",
@@ -568,6 +585,12 @@ fn json_completion(meta: &Meta, tokens: &[String], end: &RunEnd) -> Response {
     // the job was preempted and the counts describe only its last run.
     if let Some(usage) = end.usage {
         body["usage"] = serde_json::json!(usage);
+    }
+    // Mirrors the streaming shape, and stays absent for an engine that
+    // reports no trace.
+    if !reasoning.is_empty() {
+        body["choices"][0]["message"]["reasoning_content"] =
+            serde_json::json!(reasoning.concat());
     }
     Json(body).into_response()
 }

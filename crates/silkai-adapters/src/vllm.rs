@@ -259,6 +259,15 @@ async fn emit_sse(
         if let Some(reason) = choice.finish_reason {
             end.finish_reason = Some(reason);
         }
+        // A reasoning engine sends its trace as its own deltas before any
+        // content arrives. Forwarding them is what lets a client show the
+        // model thinking instead of sitting silent; dropping them here is
+        // indistinguishable from a stalled stream.
+        if let Some(text) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
+            if tx.send(Chunk::Reasoning(text)).await.is_err() {
+                return false;
+            }
+        }
         if let Some(text) = choice.delta.content.filter(|t| !t.is_empty()) {
             if tx.send(Chunk::Token(text)).await.is_err() {
                 return false;
@@ -316,4 +325,8 @@ struct StreamChoice {
 #[derive(Default, Deserialize)]
 struct StreamDelta {
     content: Option<String>,
+    /// llama.cpp under `--reasoning-format deepseek`, and other engines that
+    /// separate the trace from the answer, put it here.
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }

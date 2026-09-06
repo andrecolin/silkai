@@ -115,6 +115,10 @@ impl ChatMessage {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Chunk {
     Token(String),
+    /// A chunk of the engine's reasoning trace, when it reports one apart
+    /// from the answer. Carried separately so it never lands in the answer
+    /// text: it is shown live and then discarded, not persisted.
+    Reasoning(String),
     End(RunEnd),
     /// The engine refused this request (context window exceeded, and so on).
     /// The string is the engine's own reason and ends the stream without a
@@ -127,6 +131,8 @@ impl Chunk {
     pub fn text(&self) -> Option<&str> {
         match self {
             Chunk::Token(t) => Some(t),
+            // Reasoning is not answer text, so it carries none.
+            Chunk::Reasoning(_) => None,
             Chunk::End(_) => None,
             Chunk::Reject(_) => None,
         }
