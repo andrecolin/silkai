@@ -400,6 +400,7 @@ async fn collect_run(mut rx: mpsc::Receiver<Chunk>) -> (Vec<String>, RunEnd) {
         match chunk {
             Chunk::Token(t) => tokens.push(t),
             Chunk::End(e) => end = e,
+            Chunk::Reject(_) => {}
         }
     }
     (tokens, end)
@@ -491,6 +492,7 @@ async fn token_or_stop(
         // `End` is the last thing an engine sends, so the stream closes on it
         // rather than waiting for the channel to drop.
         Some(Chunk::End(end)) => Some(close(meta, end)),
+        Some(Chunk::Reject(_)) => Some(close(meta, RunEnd::default())),
         None => Some(close(meta, RunEnd::default())),
     }
 }

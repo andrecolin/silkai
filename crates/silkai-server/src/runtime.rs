@@ -855,8 +855,9 @@ impl Runtime {
             Err(err) => return Err(engine_err(err)),
         };
         let rt = self.clone();
+        let model = model.to_string();
         tokio::spawn(async move {
-            forward_job(job_id, rx, tx, token, rt).await;
+            forward_job(job_id, model, rx, tx, token, rt).await;
         });
         Ok(())
     }
@@ -902,12 +903,13 @@ impl Runtime {
 
 async fn forward_job(
     job_id: JobId,
+    model: String,
     rx: mpsc::Receiver<Chunk>,
     tx: mpsc::Sender<Chunk>,
     token: CancellationToken,
     rt: Runtime,
 ) {
-    pump_tokens(job_id, rx, tx, token.clone(), &rt).await;
+    pump_tokens(job_id, &model, rx, tx, token.clone(), &rt).await;
     if token.is_cancelled() {
         return;
     }
@@ -927,6 +929,7 @@ async fn apply_loop(weak: Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Vec<Actio
 
 async fn pump_tokens(
     job_id: JobId,
+    model: &str,
     mut rx: mpsc::Receiver<Chunk>,
     tx: mpsc::Sender<Chunk>,
     token: CancellationToken,
@@ -947,6 +950,10 @@ async fn pump_tokens(
                     if tx.send(Chunk::End(end)).await.is_err() {
                         return;
                     }
+                }
+                Some(Chunk::Reject(reason)) => {
+                    rt.reject(job_id, model, reason);
+                    return;
                 }
                 None => return,
             },

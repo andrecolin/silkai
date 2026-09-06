@@ -116,6 +116,10 @@ impl ChatMessage {
 pub enum Chunk {
     Token(String),
     End(RunEnd),
+    /// The engine refused this request (context window exceeded, and so on).
+    /// The string is the engine's own reason and ends the stream without a
+    /// token or an `End`.
+    Reject(String),
 }
 
 impl Chunk {
@@ -124,6 +128,7 @@ impl Chunk {
         match self {
             Chunk::Token(t) => Some(t),
             Chunk::End(_) => None,
+            Chunk::Reject(_) => None,
         }
     }
 }
