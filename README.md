@@ -332,6 +332,19 @@ curl -s http://127.0.0.1:8080/health
 
 Or without the script: `cargo install --path crates/silkai --locked`.
 
+The unit names its own `PATH`, with the install prefix first, because that is
+how a `process` engine's `cmd` gets resolved. A user manager started from a
+desktop login inherits that session's `PATH` and would usually find
+`~/.local/bin` anyway; one started by lingering at boot — a headless box, and
+what `loginctl enable-linger` is for — gets `/etc/environment` instead, where
+`~/.local/bin` is normally absent. Writing the unit by hand rather than with
+the script, set `PATH` on it too, or give `cmd` an absolute path:
+
+```bash
+loginctl enable-linger "$USER"     # keep it running with nobody logged in
+systemctl --user status silkai
+```
+
 ### Building the in-process engine
 
 ```bash

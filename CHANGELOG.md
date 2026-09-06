@@ -7,6 +7,13 @@ All notable changes to SilkAI. The format follows
 ## [Unreleased]
 
 ### Fixed
+- The systemd unit names its own `PATH`, with the install prefix first. It
+  relied on whatever the user manager had inherited: a desktop login passes
+  its session `PATH` down, so `~/.local/bin` — where `scripts/install.sh` puts
+  `silkai`, and the natural place for a llama.cpp build — was on it. A manager
+  started by lingering at boot gets `/etc/environment`, where that directory is
+  normally absent, and a `process` engine's `cmd = ["llama-server", ...]` then
+  does not resolve. Same behaviour either way now.
 - `finish_reason` is the engine's own, and `usage` is reported. Every reply
   said `"stop"` no matter how it ended, and carried no counts at all: a reply
   cut off at `max_tokens` was indistinguishable from a complete one, and a
