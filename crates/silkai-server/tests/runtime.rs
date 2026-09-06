@@ -4,7 +4,7 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
-use silkai_adapters::{ChatMessage, FakeEngine};
+use silkai_adapters::{ChatMessage, Chunk, FakeEngine};
 
 fn user(text: &str) -> Vec<ChatMessage> {
     vec![ChatMessage::user(text)]
@@ -72,8 +72,8 @@ async fn prefetch_then_soap_wakes_fake_engine() {
         .await
         .unwrap();
     let mut out = String::new();
-    while let Some(t) = tokens.recv().await {
-        out.push_str(&t);
+    while let Some(c) = tokens.recv().await {
+        out.push_str(c.text().unwrap_or_default());
     }
     rt.finished(job).await;
     assert_eq!(out, "note world");
@@ -175,8 +175,8 @@ async fn vllm_submit_streams_from_http_engine() {
         .await
         .unwrap();
     let mut out = String::new();
-    while let Some(t) = tokens.recv().await {
-        out.push_str(&t);
+    while let Some(c) = tokens.recv().await {
+        out.push_str(c.text().unwrap_or_default());
     }
     rt.finished(job).await;
     assert_eq!(out, "hello world");
@@ -204,8 +204,8 @@ async fn process_submit_streams_from_spawned_http() {
         .await
         .unwrap();
     let mut out = String::new();
-    while let Some(t) = tokens.recv().await {
-        out.push_str(&t);
+    while let Some(c) = tokens.recv().await {
+        out.push_str(c.text().unwrap_or_default());
     }
     rt.finished(job).await;
     assert_eq!(out, "hello world");
@@ -247,8 +247,8 @@ async fn ollama_submit_streams_from_http_engine() {
         .await
         .unwrap();
     let mut out = String::new();
-    while let Some(t) = tokens.recv().await {
-        out.push_str(&t);
+    while let Some(c) = tokens.recv().await {
+        out.push_str(c.text().unwrap_or_default());
     }
     rt.finished(job).await;
     assert_eq!(out, "hello world");
@@ -302,8 +302,8 @@ async fn collect_chat(rt: &Runtime, model: &str, prompt: &str) -> String {
         .await
         .unwrap();
     let mut out = String::new();
-    while let Some(t) = tokens.recv().await {
-        out.push_str(&t);
+    while let Some(c) = tokens.recv().await {
+        out.push_str(c.text().unwrap_or_default());
     }
     rt.finished(job).await;
     out
@@ -392,19 +392,32 @@ async fn preempted_soap_does_not_replay_streamed_tokens() {
         .await
         .unwrap();
     let first = soap_rx.recv().await.expect("first soap token");
-    assert_eq!(first, "note");
+    assert_eq!(first.text(), Some("note"));
     let (w_job, mut w_rx) = rt
         .submit_chat("whisper", user("hi"), Default::default())
         .await
         .unwrap();
     while w_rx.recv().await.is_some() {}
     rt.finished(w_job).await;
-    let mut got = vec![first];
-    while let Some(t) = soap_rx.recv().await {
-        got.push(t);
+    let mut got: Vec<String> = first.text().map(str::to_string).into_iter().collect();
+    let mut end = None;
+    while let Some(c) = soap_rx.recv().await {
+        match c {
+            Chunk::Token(t) => got.push(t),
+            Chunk::End(e) => end = Some(e),
+        }
     }
     rt.finished(soap_job).await;
     assert_eq!(got, vec!["note".to_string(), " world".to_string()]);
+
+    // This job was preempted after "note" and resumed from it, so the
+    // engine's counts describe only the second run: its prompt carries the
+    // text already streamed and its completion is just the remainder.
+    // The reason still holds — the last run is the one that ended the job —
+    // but the counts are dropped rather than reported wrong.
+    let end = end.expect("an end chunk");
+    assert_eq!(end.finish_reason.as_deref(), Some("stop"));
+    assert_eq!(end.usage, None);
 }
 
 fn ws_whisper_cfg() -> AppConfig {
@@ -440,8 +453,8 @@ async fn websocket_session_holds_slot_until_end() {
         .await
         .unwrap();
     let mut out = String::new();
-    while let Some(t) = rx.recv().await {
-        out.push_str(&t);
+    while let Some(c) = rx.recv().await {
+        out.push_str(c.text().unwrap_or_default());
     }
     assert_eq!(out, "hello world");
     let still = rt

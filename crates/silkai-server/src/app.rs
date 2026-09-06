@@ -11,7 +11,7 @@ use axum::{Json, Router};
 use futures_util::stream::{self, unfold};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use silkai_adapters::{ChatMessage, RunOptions};
+use silkai_adapters::{ChatMessage, Chunk, Content, RunEnd, RunOptions, Usage};
 use silkai_sched::JobId;
 use tokio::sync::mpsc;
 
@@ -245,8 +245,10 @@ impl ChatRequest {
 }
 
 /// One OpenAI-style message as clients send it. `content` is usually a
-/// string; newer clients send a list of parts, of which the text parts are
-/// joined. Anything else (images, tool calls) is dropped for now.
+/// string; newer clients send a list of parts, which is forwarded to the
+/// engine as it arrived — an image part is the engine's to interpret, not
+/// ours to drop. Engines whose wire format has no place for parts project
+/// them to their text.
 #[derive(Deserialize)]
 struct WireMessage {
     #[serde(default = "default_role")]
@@ -261,19 +263,18 @@ fn default_role() -> String {
 
 impl WireMessage {
     fn into_chat(self) -> ChatMessage {
-        ChatMessage::new(self.role, content_text(self.content))
+        ChatMessage::new(self.role, content_of(self.content))
     }
 }
 
-fn content_text(value: serde_json::Value) -> String {
+/// A string stays a string and a list of parts stays a list. Anything else is
+/// a shape no client should send; it becomes empty text rather than an error,
+/// which is what this endpoint has always done with it.
+fn content_of(value: serde_json::Value) -> Content {
     match value {
-        serde_json::Value::String(s) => s,
-        serde_json::Value::Array(parts) => parts
-            .into_iter()
-            .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(str::to_string))
-            .collect::<Vec<_>>()
-            .join(""),
-        _ => String::new(),
+        serde_json::Value::String(s) => Content::Text(s),
+        serde_json::Value::Array(parts) => Content::Parts(parts),
+        _ => Content::Text(String::new()),
     }
 }
 
@@ -353,7 +354,7 @@ fn messages_of(wire: Vec<WireMessage>) -> Vec<ChatMessage> {
 async fn finish_chat(
     rt: &Runtime,
     meta: Meta,
-    rx: mpsc::Receiver<String>,
+    rx: mpsc::Receiver<Chunk>,
     stream: bool,
 ) -> Response {
     if stream {
@@ -363,7 +364,7 @@ async fn finish_chat(
     }
 }
 
-async fn stream_or_timeout(rt: &Runtime, meta: Meta, mut rx: mpsc::Receiver<String>) -> Response {
+async fn stream_or_timeout(rt: &Runtime, meta: Meta, mut rx: mpsc::Receiver<Chunk>) -> Response {
     match tokio::time::timeout(rt.request_timeout(), rx.recv()).await {
         Ok(None) => match rt.take_rejection(meta.job) {
             Some(reason) => (StatusCode::BAD_REQUEST, reason).into_response(),
@@ -374,13 +375,13 @@ async fn stream_or_timeout(rt: &Runtime, meta: Meta, mut rx: mpsc::Receiver<Stri
     }
 }
 
-async fn json_or_timeout(rt: &Runtime, meta: Meta, rx: mpsc::Receiver<String>) -> Response {
-    match tokio::time::timeout(rt.request_timeout(), collect_tokens(rx)).await {
-        Ok(tokens) if tokens.is_empty() => match rt.take_rejection(meta.job) {
+async fn json_or_timeout(rt: &Runtime, meta: Meta, rx: mpsc::Receiver<Chunk>) -> Response {
+    match tokio::time::timeout(rt.request_timeout(), collect_run(rx)).await {
+        Ok((tokens, end)) if tokens.is_empty() => match rt.take_rejection(meta.job) {
             Some(reason) => (StatusCode::BAD_REQUEST, reason).into_response(),
-            None => json_completion(&meta, &tokens),
+            None => json_completion(&meta, &tokens, &end),
         },
-        Ok(tokens) => json_completion(&meta, &tokens),
+        Ok((tokens, end)) => json_completion(&meta, &tokens, &end),
         Err(_) => timeout_drop(rt, meta.job).await,
     }
 }
@@ -390,17 +391,24 @@ async fn timeout_drop(rt: &Runtime, job: JobId) -> Response {
     StatusCode::GATEWAY_TIMEOUT.into_response()
 }
 
-async fn collect_tokens(mut rx: mpsc::Receiver<String>) -> Vec<String> {
+/// Drains a finished job: the text it produced, and whatever the engine
+/// said about how it ended.
+async fn collect_run(mut rx: mpsc::Receiver<Chunk>) -> (Vec<String>, RunEnd) {
     let mut tokens = Vec::new();
-    while let Some(token) = rx.recv().await {
-        tokens.push(token);
+    let mut end = RunEnd::default();
+    while let Some(chunk) = rx.recv().await {
+        match chunk {
+            Chunk::Token(t) => tokens.push(t),
+            Chunk::End(e) => end = e,
+        }
     }
-    tokens
+    (tokens, end)
 }
 
-/// The stream: a `: queued` comment, a role chunk, one chunk per token,
-/// a closing chunk with `finish_reason: "stop"`, then `[DONE]`.
-fn sse_response(meta: Meta, first: Option<String>, rx: mpsc::Receiver<String>) -> Response {
+/// The stream: a `: queued` comment, a role chunk, one chunk per token, a
+/// closing chunk carrying the engine's finish reason, a usage chunk when the
+/// engine counted one, then `[DONE]`.
+fn sse_response(meta: Meta, first: Option<Chunk>, rx: mpsc::Receiver<Chunk>) -> Response {
     let start = SsePhase::Comment { meta, first, rx };
     Sse::new(unfold(start, |phase| async move {
         let (event, next) = next_sse(phase).await?;
@@ -412,18 +420,24 @@ fn sse_response(meta: Meta, first: Option<String>, rx: mpsc::Receiver<String>) -
 enum SsePhase {
     Comment {
         meta: Meta,
-        first: Option<String>,
-        rx: mpsc::Receiver<String>,
+        first: Option<Chunk>,
+        rx: mpsc::Receiver<Chunk>,
     },
     Role {
         meta: Meta,
-        pending: Option<String>,
-        rx: mpsc::Receiver<String>,
+        pending: Option<Chunk>,
+        rx: mpsc::Receiver<Chunk>,
     },
     Tokens {
         meta: Meta,
-        pending: Option<String>,
-        rx: mpsc::Receiver<String>,
+        pending: Option<Chunk>,
+        rx: mpsc::Receiver<Chunk>,
+    },
+    /// Generation is over and the closing chunk is sent; a usage chunk may
+    /// still be owed.
+    Usage {
+        meta: Meta,
+        usage: Option<Usage>,
     },
     Stop,
     Done,
@@ -444,6 +458,13 @@ async fn next_sse(phase: SsePhase) -> Option<(Event, SsePhase)> {
             SsePhase::Tokens { meta, pending, rx },
         )),
         SsePhase::Tokens { meta, pending, rx } => token_or_stop(meta, pending, rx).await,
+        SsePhase::Usage { meta, usage } => match usage {
+            Some(usage) => Some((
+                Event::default().data(usage_chunk_json(&meta, usage)),
+                SsePhase::Stop,
+            )),
+            None => Some((Event::default().data("[DONE]"), SsePhase::Done)),
+        },
         SsePhase::Stop => Some((Event::default().data("[DONE]"), SsePhase::Done)),
         SsePhase::Done => None,
     }
@@ -451,15 +472,15 @@ async fn next_sse(phase: SsePhase) -> Option<(Event, SsePhase)> {
 
 async fn token_or_stop(
     meta: Meta,
-    pending: Option<String>,
-    mut rx: mpsc::Receiver<String>,
+    pending: Option<Chunk>,
+    mut rx: mpsc::Receiver<Chunk>,
 ) -> Option<(Event, SsePhase)> {
     let next = match pending {
-        Some(token) => Some(token),
+        Some(chunk) => Some(chunk),
         None => rx.recv().await,
     };
     match next {
-        Some(token) => Some((
+        Some(Chunk::Token(token)) => Some((
             Event::default().data(chunk_json(&meta, Delta::Content(&token), None)),
             SsePhase::Tokens {
                 meta,
@@ -467,11 +488,37 @@ async fn token_or_stop(
                 rx,
             },
         )),
-        None => Some((
-            Event::default().data(chunk_json(&meta, Delta::Empty, Some("stop"))),
-            SsePhase::Stop,
-        )),
+        // `End` is the last thing an engine sends, so the stream closes on it
+        // rather than waiting for the channel to drop.
+        Some(Chunk::End(end)) => Some(close(meta, end)),
+        None => Some(close(meta, RunEnd::default())),
     }
+}
+
+/// The closing chunk, and what is still owed after it.
+fn close(meta: Meta, end: RunEnd) -> (Event, SsePhase) {
+    let event = Event::default().data(chunk_json(&meta, Delta::Empty, Some(finish_of(&end))));
+    (
+        event,
+        SsePhase::Usage {
+            meta,
+            usage: end.usage,
+        },
+    )
+}
+
+/// The trailing usage-only chunk, shaped as OpenAI streams it: no choices,
+/// just the counts.
+fn usage_chunk_json(meta: &Meta, usage: Usage) -> String {
+    serde_json::json!({
+        "id": meta.id,
+        "object": "chat.completion.chunk",
+        "created": meta.created,
+        "model": meta.model,
+        "choices": [],
+        "usage": usage,
+    })
+    .to_string()
 }
 
 enum Delta<'a> {
@@ -500,8 +547,8 @@ fn chunk_json(meta: &Meta, delta: Delta<'_>, finish: Option<&str>) -> String {
     .to_string()
 }
 
-fn json_completion(meta: &Meta, tokens: &[String]) -> Response {
-    Json(serde_json::json!({
+fn json_completion(meta: &Meta, tokens: &[String], end: &RunEnd) -> Response {
+    let mut body = serde_json::json!({
         "id": meta.id,
         "object": "chat.completion",
         "created": meta.created,
@@ -512,10 +559,21 @@ fn json_completion(meta: &Meta, tokens: &[String]) -> Response {
                 "role": "assistant",
                 "content": tokens.concat()
             },
-            "finish_reason": "stop"
+            "finish_reason": finish_of(end)
         }]
-    }))
-    .into_response()
+    });
+    // Omitted rather than guessed when the engine did not report it, or when
+    // the job was preempted and the counts describe only its last run.
+    if let Some(usage) = end.usage {
+        body["usage"] = serde_json::json!(usage);
+    }
+    Json(body).into_response()
+}
+
+/// What the engine said, or `"stop"` when it said nothing — an engine with
+/// no reason to give has always been reported as a clean stop.
+fn finish_of(end: &RunEnd) -> &str {
+    end.finish_reason.as_deref().unwrap_or("stop")
 }
 
 /// Status plus the reason as the body, so a client sees why instead of a

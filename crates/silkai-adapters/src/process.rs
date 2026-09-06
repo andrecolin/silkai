@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::vllm::VllmEngine;
-use crate::{ChatMessage, Engine, EngineError, RunOptions};
+use crate::{ChatMessage, Chunk, Engine, EngineError, RunOptions};
 
 const READY_POLL: Duration = Duration::from_millis(100);
 /// A 20-plus GB GGUF read from disk and pushed to the card can take a few
@@ -194,7 +194,7 @@ impl Engine for ProcessEngine {
         prefix: &str,
         opts: &RunOptions,
         cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<String>, EngineError> {
+    ) -> Result<mpsc::Receiver<Chunk>, EngineError> {
         self.http.run(messages, prefix, opts, cancel).await
     }
 

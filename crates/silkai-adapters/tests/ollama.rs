@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
-use silkai_adapters::{ChatMessage, Engine, EngineError, OllamaEngine, RunOptions};
+use silkai_adapters::{ChatMessage, Chunk, Engine, EngineError, OllamaEngine, RunOptions, Usage};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -57,8 +57,10 @@ async fn ollama_run_streams_ndjson_content() {
         .await
         .unwrap();
     let mut got = Vec::new();
-    while let Some(t) = rx.recv().await {
-        got.push(t);
+    while let Some(c) = rx.recv().await {
+        if let Some(t) = c.text() {
+            got.push(t.to_string());
+        }
     }
     assert_eq!(got, vec!["hello".to_string(), " world".to_string()]);
     let chat = last_json(&log, "POST /api/chat");
@@ -137,6 +139,40 @@ async fn ollama_warm_does_not_hit_http() {
     e.warm("llama3.2").await.unwrap();
     assert!(log.lock().expect("log").is_empty());
     assert_eq!(e.measured_vram_gb(), 28.0);
+}
+
+/// Ollama reports the same two facts under its own names: `done_reason`,
+/// and the `prompt_eval_count` / `eval_count` pair.
+#[tokio::test]
+async fn ollama_reports_done_reason_and_counts() {
+    let (url, _log) = spawn_mock().await;
+    let e = OllamaEngine::new("write", 28.0, &url);
+    e.load("llama3.2", 0).await.unwrap();
+    let mut rx = e
+        .run(
+            &[ChatMessage::user("hello")],
+            "",
+            &RunOptions::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut end = None;
+    while let Some(chunk) = rx.recv().await {
+        if let Chunk::End(e) = chunk {
+            end = Some(e);
+        }
+    }
+    let end = end.expect("an end chunk");
+    assert_eq!(end.finish_reason.as_deref(), Some("stop"));
+    assert_eq!(
+        end.usage,
+        Some(Usage {
+            prompt_tokens: 11,
+            completion_tokens: 2,
+            total_tokens: 13,
+        })
+    );
 }
 
 async fn spawn_mock() -> (String, Arc<Mutex<Vec<String>>>) {
@@ -257,5 +293,5 @@ const CHAT_NDJSON: &str = concat!(
     "\r\n",
     "{\"message\":{\"content\":\"hello\"},\"done\":false}\n",
     "{\"message\":{\"content\":\" world\"},\"done\":false}\n",
-    "{\"message\":{\"content\":\"\"},\"done\":true}\n",
+    "{\"message\":{\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":11,\"eval_count\":2}\n",
 );

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::{ChatMessage, Engine, EngineError, RunOptions};
+use crate::{ChatMessage, Chunk, Engine, EngineError, RunOptions};
 
 #[cfg(feature = "llama")]
 mod cpp;
@@ -89,7 +89,7 @@ impl Engine for LlamaEngine {
         prefix: &str,
         opts: &RunOptions,
         cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<String>, EngineError> {
+    ) -> Result<mpsc::Receiver<Chunk>, EngineError> {
         start_run(self, messages, prefix, opts, cancel)
     }
 
@@ -137,7 +137,7 @@ fn start_run(
     prefix: &str,
     opts: &RunOptions,
     cancel: CancellationToken,
-) -> Result<mpsc::Receiver<String>, EngineError> {
+) -> Result<mpsc::Receiver<Chunk>, EngineError> {
     cpp::start_run(
         Arc::clone(&engine.inner),
         messages.to_vec(),
@@ -154,7 +154,7 @@ fn start_run(
     prefix: &str,
     opts: &RunOptions,
     cancel: CancellationToken,
-) -> Result<mpsc::Receiver<String>, EngineError> {
+) -> Result<mpsc::Receiver<Chunk>, EngineError> {
     let _ = (engine, messages, prefix, opts, cancel);
     refuse_without_feature()
 }

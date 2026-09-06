@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::vllm::with_prefix;
-use crate::{ChatMessage, Engine, EngineError, RunOptions};
+use crate::{ChatMessage, Chunk, Engine, EngineError, RunEnd, RunOptions, Usage};
 
 struct Inner {
     on_bench: bool,
@@ -119,7 +119,7 @@ impl Engine for OllamaEngine {
         prefix: &str,
         opts: &RunOptions,
         cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<String>, EngineError> {
+    ) -> Result<mpsc::Receiver<Chunk>, EngineError> {
         if !self.on_bench() {
             return Err(EngineError::NotLoaded);
         }
@@ -130,7 +130,7 @@ impl Engine for OllamaEngine {
         }
         let client = self.client.clone();
         let url = format!("{}/api/chat", self.url);
-        let messages = with_prefix(messages, prefix);
+        let messages = flatten(with_prefix(messages, prefix));
         let opts = opts.clone();
         tokio::spawn(async move {
             stream_chat(client, url, model, messages, opts, tx, cancel).await;
@@ -143,13 +143,24 @@ impl Engine for OllamaEngine {
     }
 }
 
+/// Ollama's `/api/chat` takes `content` as a plain string — an image rides in
+/// a separate `images` field, not as an OpenAI content part — so a list of
+/// parts is projected to its text here rather than forwarded the way
+/// llama-server and vLLM take it.
+fn flatten(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .map(|m| ChatMessage::new(m.role, m.content.text().into_owned()))
+        .collect()
+}
+
 async fn stream_chat(
     client: reqwest::Client,
     url: String,
     model: String,
     messages: Vec<ChatMessage>,
     opts: RunOptions,
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<Chunk>,
     cancel: CancellationToken,
 ) {
     let mut body = serde_json::json!({
@@ -174,22 +185,32 @@ async fn stream_chat(
     };
     let mut resp = resp;
     let mut buf = String::new();
+    let mut end = RunEnd::default();
     loop {
-        tokio::select! {
+        let more = tokio::select! {
+            // A cancelled run is preempted, not finished: it has no end to
+            // report, and the job resumes from the tokens already sent.
             _ = cancel.cancelled() => return,
             chunk = resp.chunk() => match chunk {
-                Ok(Some(bytes)) => {
-                    if !emit_ndjson(&mut buf, &bytes, &tx).await {
-                        return;
-                    }
-                }
-                _ => return,
+                Ok(Some(bytes)) => emit_ndjson(&mut buf, &bytes, &tx, &mut end).await,
+                _ => false,
             }
+        };
+        if !more {
+            break;
         }
+    }
+    if end != RunEnd::default() {
+        let _ = tx.send(Chunk::End(end)).await;
     }
 }
 
-async fn emit_ndjson(buf: &mut String, bytes: &[u8], tx: &mpsc::Sender<String>) -> bool {
+async fn emit_ndjson(
+    buf: &mut String,
+    bytes: &[u8],
+    tx: &mpsc::Sender<Chunk>,
+    end: &mut RunEnd,
+) -> bool {
     buf.push_str(&String::from_utf8_lossy(bytes));
     while let Some(i) = buf.find('\n') {
         let mut line: String = buf.drain(..=i).collect();
@@ -206,8 +227,21 @@ async fn emit_ndjson(buf: &mut String, bytes: &[u8], tx: &mpsc::Sender<String>) 
             continue;
         };
         let done = chunk.done;
+        if done {
+            // The closing line is where Ollama reports why it stopped and
+            // what it counted; `eval_count` is the completion, and
+            // `prompt_eval_count` the prompt.
+            end.finish_reason = chunk.done_reason.clone();
+            if let (Some(p), Some(c)) = (chunk.prompt_eval_count, chunk.eval_count) {
+                end.usage = Some(Usage {
+                    prompt_tokens: p,
+                    completion_tokens: c,
+                    total_tokens: p + c,
+                });
+            }
+        }
         if let Some(text) = chunk.content() {
-            if !text.is_empty() && tx.send(text).await.is_err() {
+            if !text.is_empty() && tx.send(Chunk::Token(text)).await.is_err() {
                 return false;
             }
         }
@@ -232,6 +266,12 @@ struct ChatLine {
     message: Option<LineMessage>,
     #[serde(default)]
     done: bool,
+    #[serde(default)]
+    done_reason: Option<String>,
+    #[serde(default)]
+    prompt_eval_count: Option<u32>,
+    #[serde(default)]
+    eval_count: Option<u32>,
 }
 
 #[derive(Deserialize)]

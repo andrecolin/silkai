@@ -6,7 +6,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
-use silkai_adapters::{ChatMessage, RunOptions};
+use silkai_adapters::{ChatMessage, Chunk, RunEnd, RunOptions, Usage};
 use silkai_sched::JobId;
 use tokio::sync::mpsc;
 
@@ -59,6 +59,10 @@ struct ServerMsg<'a> {
     text: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish_reason: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<Usage>,
 }
 
 pub async fn session(
@@ -159,12 +163,32 @@ async fn stream_prompt(
     messages: &[ChatMessage],
     opts: &RunOptions,
 ) -> Result<(), RuntimeError> {
-    let mut rx: mpsc::Receiver<String> = rt.session_prompt(job, model, messages, opts).await?;
-    while let Some(text) = rx.recv().await {
-        send_json(socket, "token", Some(&text), None).await?;
+    let mut rx: mpsc::Receiver<Chunk> = rt.session_prompt(job, model, messages, opts).await?;
+    let mut end = RunEnd::default();
+    while let Some(chunk) = rx.recv().await {
+        match chunk {
+            Chunk::Token(text) => send_json(socket, "token", Some(&text), None).await?,
+            Chunk::End(e) => end = e,
+        }
     }
-    send_json(socket, "done", None, None).await?;
+    send_done(socket, &end).await?;
     Ok(())
+}
+
+/// `done` closes a prompt, and carries what the engine said about the run
+/// when it said anything. A client that only waits for `done` is unaffected.
+async fn send_done(socket: &mut WebSocket, end: &RunEnd) -> Result<(), RuntimeError> {
+    send_msg(
+        socket,
+        ServerMsg {
+            kind: "done",
+            text: None,
+            message: None,
+            finish_reason: end.finish_reason.as_deref(),
+            usage: end.usage,
+        },
+    )
+    .await
 }
 
 async fn send_json(
@@ -173,12 +197,22 @@ async fn send_json(
     text: Option<&str>,
     message: Option<&str>,
 ) -> Result<(), RuntimeError> {
-    let payload = serde_json::to_string(&ServerMsg {
-        kind,
-        text,
-        message,
-    })
-    .map_err(|e| RuntimeError::Engine(silkai_adapters::EngineError::Other(e.to_string())))?;
+    send_msg(
+        socket,
+        ServerMsg {
+            kind,
+            text,
+            message,
+            finish_reason: None,
+            usage: None,
+        },
+    )
+    .await
+}
+
+async fn send_msg(socket: &mut WebSocket, msg: ServerMsg<'_>) -> Result<(), RuntimeError> {
+    let payload = serde_json::to_string(&msg)
+        .map_err(|e| RuntimeError::Engine(silkai_adapters::EngineError::Other(e.to_string())))?;
     socket
         .send(Message::Text(payload.into()))
         .await

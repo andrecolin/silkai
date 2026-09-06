@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::{last_content, ChatMessage, Engine, EngineError, RunOptions};
+use crate::{last_content, ChatMessage, Chunk, Engine, EngineError, RunEnd, RunOptions, Usage};
 
 fn fail_next() -> &'static Mutex<HashMap<String, FailNext>> {
     static MAP: OnceLock<Mutex<HashMap<String, FailNext>>> = OnceLock::new();
@@ -203,7 +203,7 @@ impl Engine for FakeEngine {
         prefix: &str,
         _opts: &RunOptions,
         cancel: CancellationToken,
-    ) -> Result<mpsc::Receiver<String>, EngineError> {
+    ) -> Result<mpsc::Receiver<Chunk>, EngineError> {
         if take_fail(&self.name, |f| &mut f.run) {
             return Err(EngineError::Other("run failed".into()));
         }
@@ -230,7 +230,7 @@ fn spawn_chunks(
     prompt: String,
     prefix: String,
     cancel: CancellationToken,
-) -> mpsc::Receiver<String> {
+) -> mpsc::Receiver<Chunk> {
     let (tx, rx) = mpsc::channel(2);
     tokio::spawn(async move {
         stream_chunks(tx, prompt, prefix, cancel).await;
@@ -239,7 +239,7 @@ fn spawn_chunks(
 }
 
 async fn stream_chunks(
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<Chunk>,
     prompt: String,
     prefix: String,
     cancel: CancellationToken,
@@ -252,7 +252,7 @@ async fn stream_chunks(
             return;
         }
         let emit = leftover(&mut seen, &prefix, &chunk);
-        if !emit.is_empty() && tx.send(emit).await.is_err() {
+        if !emit.is_empty() && tx.send(Chunk::Token(emit)).await.is_err() {
             return;
         }
         if i == last {
@@ -263,6 +263,18 @@ async fn stream_chunks(
             _ = tokio::time::sleep(Duration::from_millis(80)) => {}
         }
     }
+    // A real engine says how it stopped and what it counted; the fake does
+    // too, so the scheduler tests cover that path with GB numbers alone.
+    let _ = tx
+        .send(Chunk::End(RunEnd {
+            finish_reason: Some("stop".into()),
+            usage: Some(Usage {
+                prompt_tokens: 7,
+                completion_tokens: 3,
+                total_tokens: 10,
+            }),
+        }))
+        .await;
 }
 
 fn leftover(seen: &mut String, prefix: &str, chunk: &str) -> String {
@@ -311,8 +323,10 @@ mod tests {
             .await
             .unwrap();
         let mut got = Vec::new();
-        while let Some(t) = rx.recv().await {
-            got.push(t);
+        while let Some(c) = rx.recv().await {
+            if let Some(t) = c.text() {
+                got.push(t.to_string());
+            }
         }
         assert_eq!(got, vec!["hello".to_string(), " world".to_string()]);
     }
@@ -349,8 +363,10 @@ mod tests {
             .await
             .unwrap();
         let mut got = Vec::new();
-        while let Some(t) = rx.recv().await {
-            got.push(t);
+        while let Some(c) = rx.recv().await {
+            if let Some(t) = c.text() {
+                got.push(t.to_string());
+            }
         }
         assert_eq!(got, vec![" world".to_string()]);
     }
