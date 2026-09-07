@@ -946,9 +946,15 @@ async fn pump_tokens(
                     }
                 }
                 // Not recorded as emitted: a resumed job must replay the
-                // answer it had produced, not the thinking behind it.
+                // answer it had produced, not the thinking behind it, and not
+                // a tool call the client has already been handed.
                 Some(Chunk::Reasoning(text)) => {
                     if tx.send(Chunk::Reasoning(text)).await.is_err() {
+                        return;
+                    }
+                }
+                Some(Chunk::ToolCalls(calls)) => {
+                    if tx.send(Chunk::ToolCalls(calls)).await.is_err() {
                         return;
                     }
                 }

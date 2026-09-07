@@ -170,6 +170,15 @@ async fn stream_chat(
     if let Some(t) = opts.temperature {
         body["temperature"] = serde_json::json!(t);
     }
+    // Forwarded untouched: without these the engine is never told the tools
+    // exist, and answers that it has none — which looks like a model that
+    // cannot call tools rather than a request that never carried them.
+    if let Some(tools) = &opts.tools {
+        body["tools"] = tools.clone();
+    }
+    if let Some(choice) = &opts.tool_choice {
+        body["tool_choice"] = choice.clone();
+    }
     let send = client.post(url).json(&body).send();
     let resp = tokio::select! {
         _ = cancel.cancelled() => return,
@@ -263,6 +272,11 @@ async fn emit_sse(
         // content arrives. Forwarding them is what lets a client show the
         // model thinking instead of sitting silent; dropping them here is
         // indistinguishable from a stalled stream.
+        if let Some(calls) = choice.delta.tool_calls.filter(|c| !c.is_null()) {
+            if tx.send(Chunk::ToolCalls(calls)).await.is_err() {
+                return false;
+            }
+        }
         if let Some(text) = choice.delta.reasoning_content.filter(|t| !t.is_empty()) {
             if tx.send(Chunk::Reasoning(text)).await.is_err() {
                 return false;
@@ -329,4 +343,7 @@ struct StreamDelta {
     /// separate the trace from the answer, put it here.
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// Fragments of the tool calls the model is requesting.
+    #[serde(default)]
+    tool_calls: Option<serde_json::Value>,
 }
