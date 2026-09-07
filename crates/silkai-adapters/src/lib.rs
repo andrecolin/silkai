@@ -84,6 +84,18 @@ impl From<Vec<serde_json::Value>> for Content {
 pub struct ChatMessage {
     pub role: String,
     pub content: Content,
+    /// The tool calls an assistant turn asked for, verbatim. Carried so a
+    /// tool-using conversation can be replayed to the engine: an assistant
+    /// turn that requested a call, and the `tool` turn answering it, are both
+    /// part of the history the next request must reproduce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<serde_json::Value>,
+    /// Which call a `role: "tool"` turn is answering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Present on some providers' tool turns; passed through untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl ChatMessage {
@@ -91,6 +103,9 @@ impl ChatMessage {
         Self {
             role: role.into(),
             content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
         }
     }
 
@@ -115,6 +130,15 @@ impl ChatMessage {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Chunk {
     Token(String),
+    /// A chunk of the engine's reasoning trace, when it reports one apart
+    /// from the answer. Carried separately so it never lands in the answer
+    /// text: it is shown live and then discarded, not persisted.
+    Reasoning(String),
+    /// One `delta.tool_calls` fragment, exactly as the engine sent it.
+    /// Fragments carry an `index` and a partial `arguments` string that the
+    /// receiver assembles; forwarding them verbatim keeps that contract
+    /// between the client and the engine rather than reinterpreting it.
+    ToolCalls(serde_json::Value),
     End(RunEnd),
     /// The engine refused this request (context window exceeded, and so on).
     /// The string is the engine's own reason and ends the stream without a
@@ -127,6 +151,9 @@ impl Chunk {
     pub fn text(&self) -> Option<&str> {
         match self {
             Chunk::Token(t) => Some(t),
+            // Neither reasoning nor a tool call is answer text.
+            Chunk::Reasoning(_) => None,
+            Chunk::ToolCalls(_) => None,
             Chunk::End(_) => None,
             Chunk::Reject(_) => None,
         }
@@ -167,6 +194,11 @@ pub struct Usage {
 pub struct RunOptions {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// The client's tool declarations and choice, forwarded verbatim. silkai
+    /// does not model the tool schema — it is the engine's contract with the
+    /// client, and anything silkai reshapes here it would eventually drop.
+    pub tools: Option<serde_json::Value>,
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 /// The text a plain completion engine sees: the last message's content.
