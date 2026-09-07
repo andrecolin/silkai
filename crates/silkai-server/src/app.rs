@@ -561,12 +561,7 @@ fn chunk_json(meta: &Meta, delta: Delta<'_>, finish: Option<&str>) -> String {
     .to_string()
 }
 
-fn json_completion(
-    meta: &Meta,
-    tokens: &[String],
-    reasoning: &[String],
-    end: &RunEnd,
-) -> Response {
+fn json_completion(meta: &Meta, tokens: &[String], reasoning: &[String], end: &RunEnd) -> Response {
     let mut body = serde_json::json!({
         "id": meta.id,
         "object": "chat.completion",
@@ -589,8 +584,7 @@ fn json_completion(
     // Mirrors the streaming shape, and stays absent for an engine that
     // reports no trace.
     if !reasoning.is_empty() {
-        body["choices"][0]["message"]["reasoning_content"] =
-            serde_json::json!(reasoning.concat());
+        body["choices"][0]["message"]["reasoning_content"] = serde_json::json!(reasoning.concat());
     }
     Json(body).into_response()
 }
