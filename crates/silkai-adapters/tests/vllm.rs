@@ -48,13 +48,21 @@ async fn vllm_run_sends_the_tools_it_was_given() {
         ..RunOptions::default()
     };
     let mut rx = e
-        .run(&[ChatMessage::user("count them")], "", &opts, CancellationToken::new())
+        .run(
+            &[ChatMessage::user("count them")],
+            "",
+            &opts,
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     while rx.recv().await.is_some() {}
     // Without this the engine is never told the tools exist, and answers that
     // it has none — which reads as a model that cannot call tools.
-    assert!(logged(&log, "run_sql"), "the tool declaration must reach the engine");
+    assert!(
+        logged(&log, "run_sql"),
+        "the tool declaration must reach the engine"
+    );
     assert!(logged(&log, "tool_choice"), "and so must tool_choice");
 }
 
@@ -64,7 +72,12 @@ async fn vllm_run_forwards_tool_call_fragments_verbatim() {
     let e = VllmEngine::new("write", 28.0, &url);
     e.load("Qwen/Qwen3-0.6B", 0).await.unwrap();
     let mut rx = e
-        .run(&[ChatMessage::user("count them")], "", &RunOptions::default(), CancellationToken::new())
+        .run(
+            &[ChatMessage::user("count them")],
+            "",
+            &RunOptions::default(),
+            CancellationToken::new(),
+        )
         .await
         .unwrap();
     let mut fragments = Vec::new();
@@ -78,10 +91,17 @@ async fn vllm_run_forwards_tool_call_fragments_verbatim() {
             _ => {}
         }
     }
-    assert_eq!(fragments.len(), 3, "every fragment is passed on, not just the first");
+    assert_eq!(
+        fragments.len(),
+        3,
+        "every fragment is passed on, not just the first"
+    );
     assert_eq!(fragments[0][0]["function"]["name"], "run_sql");
     assert!(content.is_empty(), "a tool call is not answer text");
-    assert_eq!(end.expect("an end chunk").finish_reason.as_deref(), Some("tool_calls"));
+    assert_eq!(
+        end.expect("an end chunk").finish_reason.as_deref(),
+        Some("tool_calls")
+    );
 }
 
 #[tokio::test]

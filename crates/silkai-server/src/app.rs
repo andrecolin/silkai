@@ -445,7 +445,9 @@ struct Collected {
 /// on `index` — appending arguments, and taking every other field the first
 /// time it appears.
 fn merge_tool_calls(into: &mut Vec<serde_json::Value>, fragment: serde_json::Value) {
-    let Some(items) = fragment.as_array() else { return };
+    let Some(items) = fragment.as_array() else {
+        return;
+    };
     for item in items {
         let idx = item.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
         if into.len() <= idx {
@@ -466,8 +468,7 @@ fn merge_tool_calls(into: &mut Vec<serde_json::Value>, fragment: serde_json::Val
                     if fk == "arguments" {
                         // The one field that accumulates rather than replaces.
                         let acc = f["arguments"].as_str().unwrap_or("").to_string();
-                        f["arguments"] =
-                            serde_json::json!(acc + fv.as_str().unwrap_or(""));
+                        f["arguments"] = serde_json::json!(acc + fv.as_str().unwrap_or(""));
                     } else {
                         f[fk] = fv.clone();
                     }
@@ -668,8 +669,7 @@ fn json_completion(meta: &Meta, c: &Collected) -> Response {
     // Mirrors the streaming shape, and stays absent for an engine that
     // reports no trace.
     if !reasoning.is_empty() {
-        body["choices"][0]["message"]["reasoning_content"] =
-            serde_json::json!(reasoning.concat());
+        body["choices"][0]["message"]["reasoning_content"] = serde_json::json!(reasoning.concat());
     }
     if !c.tool_calls.is_empty() {
         body["choices"][0]["message"]["tool_calls"] = serde_json::json!(c.tool_calls);
@@ -843,7 +843,13 @@ mod tests {
         assert_eq!(sent["tool_call_id"], "call_1");
         // A message with no tool fields must not grow empty ones.
         let plain = serde_json::to_value(ChatMessage::user("hi")).expect("serializable");
-        assert!(plain.get("tool_call_id").is_none(), "absent stays absent: {plain}");
-        assert!(plain.get("tool_calls").is_none(), "absent stays absent: {plain}");
+        assert!(
+            plain.get("tool_call_id").is_none(),
+            "absent stays absent: {plain}"
+        );
+        assert!(
+            plain.get("tool_calls").is_none(),
+            "absent stays absent: {plain}"
+        );
     }
 }
