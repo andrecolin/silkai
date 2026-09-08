@@ -6,7 +6,29 @@ All notable changes to SilkAI. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-08
+
 ### Fixed
+- `tools` and `tool_choice` reach the engine, and so do the `tool_calls`
+  they produce. The adapter built its own request body from `model`,
+  `messages`, `stream`, and the sampling options, and dropped everything
+  else, so a model asked to use a tool answered that it had none. Streamed
+  `delta.tool_calls` fragments go through as the engine framed them; a
+  non-streaming reply assembles them into whole calls. History carries
+  `tool_calls` and `tool_call_id` so the next turn can replay the
+  conversation. An empty run that asked for a tool is no longer mistaken
+  for the empty answer a rejection hides behind.
+- A reasoning engine's trace reaches the client. The adapter parsed only
+  `content` deltas, so `reasoning_content` — llama.cpp under
+  `--reasoning-format deepseek`, and the like — was discarded, and a
+  client saw nothing for the first stretch of a reasoned answer, which
+  looks like a stalled stream. The trace is `delta.reasoning_content` on
+  the stream, `message.reasoning_content` on a non-streaming reply, and a
+  `reasoning` message on a session; it is never mixed into the answer.
+- An engine that refuses a request (llama-server's "exceeds the available
+  context size", and so on) now returns 400 with the engine's own message.
+  The adapter used to drop a non-2xx and close the token channel, so the
+  server answered 200 with empty content.
 - The systemd unit names its own `PATH`, with the install prefix first. It
   relied on whatever the user manager had inherited: a desktop login passes
   its session `PATH` down, so `~/.local/bin` — where `scripts/install.sh` puts
@@ -79,4 +101,5 @@ First crates.io release: `silkai`, `silkai-server`, `silkai-adapters`,
 - The in-process llama.cpp engine returned an empty answer for prompts over
   256 tokens.
 
+[0.6.0]: https://github.com/andrecolin/silkai/releases/tag/v0.6.0
 [0.5.0]: https://github.com/andrecolin/silkai/releases/tag/v0.5.0

@@ -217,13 +217,19 @@ numbers.
 `POST /v1/chat/completions` takes the OpenAI shape. The whole `messages`
 list reaches the engine, so system prompts and history work; `content` may
 be a string or a list of content parts, forwarded as it arrived so an image
-part reaches a model that can read one; `max_tokens`, `temperature`, and
-`"stream": true` are honoured. Replies carry `id`, `model`, `created`, and
-`finish_reason` — the engine's own, so a reply cut off by `max_tokens` says
-`length` and not `stop` — and `usage` when the engine counted it. Streams
-open with a role chunk, close with a chunk carrying the finish reason, then
-a usage chunk if there is one, then `[DONE]`. The official SDKs work as
-they are:
+part reaches a model that can read one; `tools` and `tool_choice` go
+through untouched, and so do `tool_calls` / `tool_call_id` on later turns,
+so a tool-using conversation can be replayed. SilkAI does not run the
+tools: it hands the declarations to the engine and the calls back to the
+client. `max_tokens`, `temperature`, and `"stream": true` are honoured.
+Replies carry `id`, `model`, `created`, and `finish_reason` — the engine's
+own, so a reply cut off by `max_tokens` says `length` and not `stop` — and
+`usage` when the engine counted it. A call the engine asked for is on the
+message as `tool_calls`; a reasoning trace is `reasoning_content`, never
+mixed into the answer. Streams open with a role chunk, then the engine's
+own deltas (`content`, `reasoning_content`, `tool_calls` fragments), close
+with a chunk carrying the finish reason, then a usage chunk if there is
+one, then `[DONE]`. The official SDKs work as they are:
 
 ```python
 from openai import OpenAI
@@ -232,24 +238,28 @@ client.chat.completions.create(model="soap", messages=[{"role": "user", "content
 ```
 
 `GET /v1/models` lists the configured names. Errors return the reason in
-the body: an unknown model is 404, a disabled one 400, a prompt the engine
-cannot take (too long for its window) 400, an engine failure 500. If an
-engine fails, that job fails, the copy is marked not resident, and the next
-request loads it again; the daemon stays up.
+the body: an unknown model is 404, a disabled one 400, a request the
+engine refuses (too long for its window, and the like) 400 with the
+engine's own message, an engine failure 500. If an engine fails, that job
+fails, the copy is marked not resident, and the next request loads it
+again; the daemon stays up.
 
 A job that was preempted mid-stream and resumed reports its finish reason
 but no usage: the engine counted only the run that finished, whose prompt
 carries the text already streamed and whose completion is just the
-remainder. A count that does not describe the request is worse than none. A request preempted mid-stream
-resumes from the tokens already sent; the client never sees a prefix twice.
+remainder. A count that does not describe the request is worse than none.
+A request preempted mid-stream resumes from the tokens already sent; the
+client never sees a prefix twice.
 
 **Sessions.** Any model with `transport = "websocket"` or `"both"` takes
 `GET /v1/session?model=whisper`. The socket says `queued`, then `live`; from
 then on the model stays on the card until the socket closes or goes idle.
 Send `{"type":"prompt","content":"..."}` (or `"messages": [...]` with
-`max_tokens` / `temperature`) and read `token` messages until `done`, which
+`max_tokens` / `temperature` / `tools`) and read `token` messages — and
+`reasoning` / `tool_calls` when the engine sent them — until `done`, which
 carries `finish_reason` and `usage` when the engine reported them. The
-app decides what to do with the text next; SilkAI does not chain models.
+app decides what to do with the text — or the tool call — next; SilkAI
+does not chain models.
 
 A session that only pins a model has nothing to send. Hold it open with a
 WebSocket ping or `{"type":"ping"}`; either one restarts the idle timer
