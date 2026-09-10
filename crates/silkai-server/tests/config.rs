@@ -446,3 +446,70 @@ ram_headroom_gb = 8
     let cfg = load_from_str_probed_ram(t, 256.0).unwrap();
     assert_eq!(cfg.resources.ram_shelf_gb, 56.0);
 }
+
+#[test]
+fn parses_sdcpp_engine_output_and_params() {
+    let t = r#"
+listen = "127.0.0.1:8080"
+
+[resources]
+gpu_total_gb = 32
+ram_total_gb = 128
+
+[models.h3]
+engine = "sdcpp"
+path = "h3"
+url = "http://127.0.0.1:8110"
+cmd = ["sd-server", "-M", "vid_gen", "--listen-port", "8110"]
+output_dir = "/var/lib/silkai/h3"
+link_base = "https://clinic.example/silkai"
+vram_gb = 14
+priority = "normal"
+
+[models.h3.params]
+width = 640
+height = 384
+video_frames = 56
+sample_params = { sample_steps = 8 }
+"#;
+    let cfg = load_from_str(t).unwrap();
+    let h3 = cfg.enabled.iter().find(|m| m.spec.name == "h3").unwrap();
+    assert_eq!(h3.engine, "sdcpp");
+    let out = h3.output.as_ref().unwrap();
+    assert_eq!(out.dir, std::path::PathBuf::from("/var/lib/silkai/h3"));
+    assert_eq!(out.link_base, "https://clinic.example/silkai");
+    assert_eq!(h3.params["width"], 640);
+    assert_eq!(h3.params["video_frames"], 56);
+    assert_eq!(h3.params["sample_params"]["sample_steps"], 8);
+}
+
+#[test]
+fn model_without_params_or_output_has_none() {
+    let cfg = load_from_str(TOML).unwrap();
+    let soap = cfg.enabled.iter().find(|m| m.spec.name == "soap").unwrap();
+    assert!(soap.output.is_none());
+    assert!(soap.params.is_null());
+}
+
+#[test]
+fn sdcpp_engine_requires_cmd_url_and_output_dir() {
+    let base = r#"
+listen = "127.0.0.1:8080"
+[resources]
+gpu_total_gb = 32
+ram_total_gb = 128
+[models.h3]
+engine = "sdcpp"
+path = "h3"
+vram_gb = 14
+priority = "normal"
+"#;
+    let cmd = "cmd = [\"sd-server\"]\n";
+    let url = "url = \"http://127.0.0.1:8110\"\n";
+    let dir = "output_dir = \"/tmp/h3\"\n";
+    assert!(load_from_str(&format!("{base}{url}{dir}")).is_err());
+    assert!(load_from_str(&format!("{base}{cmd}{dir}")).is_err());
+    assert!(load_from_str(&format!("{base}{cmd}{url}")).is_err());
+    assert!(load_from_str(&format!("{base}{cmd}{url}output_dir = \"\"\n")).is_err());
+    assert!(load_from_str(&format!("{base}{cmd}{url}{dir}")).is_ok());
+}

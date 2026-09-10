@@ -43,6 +43,8 @@ fn one_fake_cfg(name: &str) -> AppConfig {
             transport: "http".into(),
             idle_timeout_secs: None,
             ctx_size: None,
+            output: None,
+            params: serde_json::Value::Null,
             spec: ModelSpec {
                 name: name.into(),
                 vram_gb: 8.0,

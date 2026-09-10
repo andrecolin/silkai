@@ -26,6 +26,8 @@ fn clinic_cfg() -> AppConfig {
             transport: "http".into(),
             idle_timeout_secs: None,
             ctx_size: None,
+            output: None,
+            params: serde_json::Value::Null,
             spec,
         })
         .collect();
@@ -50,6 +52,8 @@ fn too_big() -> ConfiguredModel {
         transport: "http".into(),
         idle_timeout_secs: None,
         ctx_size: None,
+        output: None,
+        params: serde_json::Value::Null,
         spec: ModelSpec {
             name: "too-big".into(),
             vram_gb: 40.0,
@@ -269,6 +273,8 @@ fn crashy_cfg(name: &str) -> AppConfig {
             transport: "http".into(),
             idle_timeout_secs: None,
             ctx_size: None,
+            output: None,
+            params: serde_json::Value::Null,
             spec: ModelSpec {
                 name: name.into(),
                 vram_gb: 8.0,

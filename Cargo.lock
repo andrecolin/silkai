@@ -1320,11 +1320,13 @@ name = "silkai-adapters"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "base64",
  "libc",
  "llama-cpp-2",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",

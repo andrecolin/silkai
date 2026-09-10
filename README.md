@@ -158,6 +158,9 @@ exclusive = true
 | `idle_timeout_secs` | close an idle session socket after this long (default 45). |
 | `ram_gb` | RAM held while parked, if not the same as `vram_gb`. |
 | `ctx_size` | context window for the in-process llama.cpp engine (default 4096). |
+| `output_dir` | where the `sdcpp` engine writes the clips it generates; served under `/v1/files/{model}/`. |
+| `link_base` | what precedes `/v1/files/...` in the link an `sdcpp` reply carries: the URL clients reach SilkAI at, when it sits behind a gateway. Empty (default) gives a relative link. |
+| `params` | a table of extra request fields for the `sdcpp` engine (`width`, `video_frames`, `sample_params`, ...), passed through as JSON. |
 
 A model larger than any card's schedulable memory is listed but disabled;
 `silkai check` says so.
@@ -178,6 +181,44 @@ group; the next wake starts it again, which is fast from the page cache. The
 child gets `CUDA_VISIBLE_DEVICES` set to the card SilkAI chose, and its
 stderr goes to SilkAI's log. Anything that speaks OpenAI chat and has a
 health endpoint works: `llama-server`, `vllm serve`, and the like.
+
+**`sdcpp`**, a [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
+`sd-server` that answers a chat turn with a video. SilkAI runs the command,
+waits for `GET /sdcpp/v1/capabilities` (sd-server has no `/health`), and
+schedules it on the card like any other model. A chat request's last user
+turn is the prompt — an attached image is the first frame — and is submitted
+as a `vid_gen` job. While it queues and generates, the stream carries
+`reasoning_content` lines (`queued, 1 ahead`, `generating, 45s`) so a client
+that shows the model thinking shows the wait. The finished clip is written
+to `output_dir` and the one assistant message is a `<video>` tag plus a
+Markdown link to `/v1/files/{model}/{name}`, which SilkAI serves. `max_tokens`
+and `temperature` mean nothing here and are ignored; put generation
+settings in `params`.
+
+```toml
+[models.h3]
+engine = "sdcpp"
+path = "h3"
+url = "http://127.0.0.1:8110"           # must match --listen-port below
+cmd = ["sd-server",
+       "--diffusion-model", "/models/minimax-h3/minimax_h3_fl2va_pruned-Q4_K.gguf",
+       "--llm", "/models/minimax-h3/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+       "--vae", "/models/minimax-h3/vae/minimax_h3_video_vae_fp16.safetensors",
+       "--audio-vae", "/models/minimax-h3/vae/minimax_h3_audio_vae_fp32.safetensors",
+       "--backend", "te=cpu", "--diffusion-fa", "--offload-to-cpu",
+       "--listen-ip", "127.0.0.1", "--listen-port", "8110"]
+output_dir = "/var/lib/silkai/h3"
+link_base = "https://clinic.example/silkai"   # if clients reach SilkAI through a gateway
+vram_gb = 16
+priority = "normal"
+keep_warm = false
+
+[models.h3.params]                      # vid_gen request fields; the server's defaults otherwise
+width = 640
+height = 384
+video_frames = 56
+sample_params = { sample_steps = 8, guidance = { txt_cfg = 1.0 } }
+```
 
 **`vllm`**, for a vLLM you run yourself. SilkAI posts `/wake_up` and
 `/sleep?level=1` (start vLLM with `VLLM_SERVER_DEV_MODE=1` and

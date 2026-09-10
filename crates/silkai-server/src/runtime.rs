@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use silkai_adapters::{
     ChatMessage, Chunk, Engine, EngineError, FakeEngine, LlamaEngine, OllamaEngine, ProcessEngine,
-    RunEnd, RunOptions, VllmEngine,
+    RunEnd, RunOptions, SdcppEngine, SdcppOutput, VllmEngine,
 };
 use silkai_sched::{
     Action, JobId, RejectReason, SchedError, Scheduler, StatusSnapshot, SubmitResult,
@@ -241,6 +241,16 @@ impl Runtime {
                 .as_deref(),
             Some("websocket") | Some("both")
         )
+    }
+
+    /// The directory a file-producing engine writes to, when `model` has
+    /// one; what `/v1/files/{model}/` serves from.
+    pub fn output_dir(&self, model: &str) -> Option<std::path::PathBuf> {
+        self.inner
+            .models
+            .get(model)
+            .and_then(|m| m.output.as_ref())
+            .map(|o| o.dir.clone())
     }
 
     pub fn idle_timeout(&self, model: &str) -> Duration {
@@ -999,12 +1009,16 @@ fn arc_engine(model: &ConfiguredModel) -> Option<Arc<dyn Engine>> {
         "vllm" => Some(vllm_engine(model)),
         "ollama" => Some(ollama_engine(model)),
         "process" => Some(process_engine(model)),
+        "sdcpp" => Some(sdcpp_engine(model)),
         _ => None,
     }
 }
 
 fn known_engine(engine: &str) -> bool {
-    matches!(engine, "fake" | "llama.cpp" | "vllm" | "ollama" | "process")
+    matches!(
+        engine,
+        "fake" | "llama.cpp" | "vllm" | "ollama" | "process" | "sdcpp"
+    )
 }
 
 fn transports_for(models: &[ConfiguredModel]) -> HashMap<String, String> {
@@ -1062,6 +1076,35 @@ fn process_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {
     ))
 }
 
+/// Config validation guarantees `url` and `output` for this engine; the
+/// fallbacks here only keep a hand-built `ConfiguredModel` from panicking.
+fn sdcpp_engine(model: &ConfiguredModel) -> Arc<dyn Engine> {
+    let url = model
+        .url
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:1234".into());
+    let output = match &model.output {
+        Some(o) => SdcppOutput {
+            dir: o.dir.clone(),
+            link_base: o.link_base.clone(),
+        },
+        None => SdcppOutput {
+            dir: std::env::temp_dir()
+                .join("silkai-files")
+                .join(&model.spec.name),
+            link_base: String::new(),
+        },
+    };
+    Arc::new(SdcppEngine::new(
+        &model.spec.name,
+        model.spec.vram_gb,
+        url,
+        model.cmd.clone(),
+        output,
+        model.params.clone(),
+    ))
+}
+
 fn warn_missing_llama() {
     if cfg!(feature = "llama") {
         return;
@@ -1082,7 +1125,7 @@ fn unavailable_set(models: &[ConfiguredModel]) -> HashSet<String> {
 
 fn engine_available(engine: &str) -> bool {
     match engine {
-        "fake" | "vllm" | "ollama" | "process" => true,
+        "fake" | "vllm" | "ollama" | "process" | "sdcpp" => true,
         "llama.cpp" => cfg!(feature = "llama"),
         _ => false,
     }

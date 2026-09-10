@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -38,6 +38,21 @@ pub struct ConfiguredModel {
     /// Context window for the in-process llama.cpp engine. Other engines
     /// take it from their own command line.
     pub ctx_size: Option<u32>,
+    /// Where an engine that answers with a file (`sdcpp`) writes it, and
+    /// how the reply links to it.
+    pub output: Option<OutputConfig>,
+    /// Engine-specific request fields (`[models.x.params]`), passed through
+    /// as JSON. `Null` when the table is absent.
+    pub params: serde_json::Value,
+}
+
+/// Files an engine produces are served under `/v1/files/{model}/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputConfig {
+    pub dir: PathBuf,
+    /// What precedes `/v1/files/...` in the link a reply carries. Empty
+    /// means a relative link.
+    pub link_base: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +133,12 @@ struct FileModel {
     url: Option<String>,
     #[serde(default)]
     cmd: Vec<String>,
+    #[serde(default)]
+    output_dir: Option<String>,
+    #[serde(default)]
+    link_base: Option<String>,
+    #[serde(default)]
+    params: Option<toml::Value>,
 }
 
 pub fn load_from_str(s: &str) -> Result<AppConfig, ConfigError> {
@@ -341,11 +362,34 @@ fn limit_for(spec: &ModelSpec, resources: &Resources) -> f64 {
 }
 
 fn configured_model(name: String, m: FileModel) -> Result<ConfiguredModel, ConfigError> {
-    if m.engine == "process" && m.cmd.is_empty() {
+    if matches!(m.engine.as_str(), "process" | "sdcpp") && m.cmd.is_empty() {
         return Err(ConfigError::Invalid(format!(
-            "model {name}: engine process requires cmd"
+            "model {name}: engine {} requires cmd",
+            m.engine
         )));
     }
+    if m.engine == "sdcpp" && m.output_dir.as_deref().unwrap_or("").is_empty() {
+        return Err(ConfigError::Invalid(format!(
+            "model {name}: engine sdcpp requires output_dir"
+        )));
+    }
+    if m.engine == "sdcpp" && m.url.is_none() {
+        return Err(ConfigError::Invalid(format!(
+            "model {name}: engine sdcpp requires url (where cmd listens)"
+        )));
+    }
+    let params = match m.params {
+        Some(table) => serde_json::to_value(table)
+            .map_err(|e| ConfigError::Invalid(format!("model {name}: params: {e}")))?,
+        None => serde_json::Value::Null,
+    };
+    let output = m
+        .output_dir
+        .filter(|d| !d.is_empty())
+        .map(|dir| OutputConfig {
+            dir: PathBuf::from(dir),
+            link_base: m.link_base.unwrap_or_default(),
+        });
     if m.gpus.len() == 1 {
         return Err(ConfigError::Invalid(format!(
             "model {name}: gpus needs two or more ids; use gpu = {} to pin one card",
@@ -376,6 +420,8 @@ fn configured_model(name: String, m: FileModel) -> Result<ConfiguredModel, Confi
         transport: m.transport,
         idle_timeout_secs: m.idle_timeout_secs,
         ctx_size: m.ctx_size,
+        output,
+        params,
     })
 }
 

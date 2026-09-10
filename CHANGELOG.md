@@ -6,6 +6,21 @@ All notable changes to SilkAI. The format follows
 
 ## [Unreleased]
 
+### Added
+- An `sdcpp` engine: a managed stable-diffusion.cpp `sd-server` that answers
+  a chat turn with a generated video. SilkAI starts it, waits for
+  `GET /sdcpp/v1/capabilities` (the server has no `/health`), and schedules it
+  on the card like any other model. The last user turn is the prompt, an
+  attached image the first frame; the job is submitted to `/sdcpp/v1/vid_gen`
+  and polled, with its queue position and elapsed time streamed as
+  `reasoning_content` so a client shows the wait. The clip lands in the
+  model's `output_dir`, served at `GET /v1/files/{model}/{name}`, and the
+  reply is a `<video>` tag plus a Markdown link to it. New model fields:
+  `output_dir`, `link_base`, and a `params` table of request fields.
+- `/v1/files/{model}/{name}` hands out what a file-producing engine wrote
+  for that model. Only single-segment names the engine could have written
+  are looked up.
+
 ### Fixed
 - The systemd unit names its own `PATH`, with the install prefix first. It
   relied on whatever the user manager had inherited: a desktop login passes
