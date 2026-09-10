@@ -185,15 +185,26 @@ health endpoint works: `llama-server`, `vllm serve`, and the like.
 **`sdcpp`**, a [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
 `sd-server` that answers a chat turn with a video. SilkAI runs the command,
 waits for `GET /sdcpp/v1/capabilities` (sd-server has no `/health`), and
-schedules it on the card like any other model. A chat request's last user
-turn is the prompt — an attached image is the first frame — and is submitted
-as a `vid_gen` job. While it queues and generates, the stream carries
+schedules it on the card like any other model: it is parked and evicted by
+the same rules, so a video model and a chat model that cannot share the
+card take turns instead of colliding. A chat request's last user turn is
+the prompt — an attached image is the first frame — and is submitted as a
+`vid_gen` job. While it queues and generates, the stream carries
 `reasoning_content` lines (`queued, 1 ahead`, `generating, 45s`) so a client
 that shows the model thinking shows the wait. The finished clip is written
 to `output_dir` and the one assistant message is a `<video>` tag plus a
-Markdown link to `/v1/files/{model}/{name}`, which SilkAI serves. `max_tokens`
-and `temperature` mean nothing here and are ignored; put generation
-settings in `params`.
+Markdown link to `/v1/files/{model}/{name}`, which SilkAI serves:
+
+```
+<video controls src="/v1/files/h3/job_6aa3115f_00000000.webm"></video>
+
+[job_6aa3115f_00000000.webm](/v1/files/h3/job_6aa3115f_00000000.webm)
+```
+
+A client that renders HTML plays it inline; one that renders only Markdown
+shows the link. The link is relative unless `link_base` is set, so a client
+that reaches SilkAI through a gateway needs the gateway to pass `/v1/files/`
+through and `link_base` set to the address the client uses.
 
 ```toml
 [models.h3]
@@ -209,16 +220,42 @@ cmd = ["sd-server",
        "--listen-ip", "127.0.0.1", "--listen-port", "8110"]
 output_dir = "/var/lib/silkai/h3"
 link_base = "https://clinic.example/silkai"   # if clients reach SilkAI through a gateway
-vram_gb = 16
+vram_gb = 20
 priority = "normal"
 keep_warm = false
 
 [models.h3.params]                      # vid_gen request fields; the server's defaults otherwise
 width = 640
 height = 384
-video_frames = 56
+video_frames = 124
 sample_params = { sample_steps = 8, guidance = { txt_cfg = 1.0 } }
 ```
+
+Generation settings live in `params`, not in the request. A chat request
+has no field for frame counts or resolution, and `max_tokens` and
+`temperature` mean nothing here and are ignored; to change the length, edit
+`params` and reload. The table is passed to sd-server as the request body
+under the prompt, so anything its
+[`vid_gen` API](https://github.com/leejet/stable-diffusion.cpp/blob/master/examples/server/api.md)
+accepts goes there.
+
+What to expect, measured with MiniMax-H3 (the 4-bit denoiser, the text
+encoder on CPU) on a 32 GB Tesla V100 at 640x384 and 8 steps:
+
+| `video_frames` | clip | time | peak on the card |
+|---|---|---|---|
+| 56 | 2.3 s | 142 s | 13 GB |
+| 124 | 5.1 s | 299 s | 15 GB |
+| 243 | 10.1 s | 629 s | 17 GB |
+
+Time is close to linear in frames, about 2.5 s per frame on that card;
+memory grows slowly, since `--offload-to-cpu` keeps the weights in RAM and
+pulls each stage onto the card as it runs. Idle, the server holds under
+1 GB, but `vram_gb` must cover the peak, since that is when the card is
+contended. MiniMax-H3's frame counts snap upward to 17k+5 (56, 124, 243,
+362) and its ceiling is 362 frames, 15 seconds. Set
+`resources.request_timeout_secs` above the longest clip you allow: the
+default 600 is enough for five seconds, not ten.
 
 **`vllm`**, for a vLLM you run yourself. SilkAI posts `/wake_up` and
 `/sleep?level=1` (start vLLM with `VLLM_SERVER_DEV_MODE=1` and
@@ -271,6 +308,11 @@ from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="unused")
 client.chat.completions.create(model="soap", messages=[{"role": "user", "content": "..."}])
 ```
+
+`GET /v1/files/{model}/{name}` hands out a file an engine produced for
+that model — the clip an `sdcpp` reply links to — with a content type from
+its extension. Only a single-segment name the engine could have written is
+looked up; anything else is 404.
 
 `GET /v1/models` lists the configured names. Errors return the reason in
 the body: an unknown model is 404, a disabled one 400, a prompt the engine
