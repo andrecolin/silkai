@@ -6,6 +6,8 @@ All notable changes to SilkAI. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-21
+
 ### Added
 - `POST /v1/decision`, for a llama-server built from the
   `parallel-decision` branch: a finite schema answered in one batched pass
@@ -125,5 +127,6 @@ First crates.io release: `silkai`, `silkai-server`, `silkai-adapters`,
 - The in-process llama.cpp engine returned an empty answer for prompts over
   256 tokens.
 
+[0.7.0]: https://github.com/andrecolin/silkai/releases/tag/v0.7.0
 [0.6.0]: https://github.com/andrecolin/silkai/releases/tag/v0.6.0
 [0.5.0]: https://github.com/andrecolin/silkai/releases/tag/v0.5.0

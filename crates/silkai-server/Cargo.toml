@@ -1,6 +1,6 @@
 [package]
 name = "silkai-server"
-description = "HTTP and WebSocket daemon for SilkAI: OpenAI-style chat on top of the GPU scheduler"
+description = "HTTP and WebSocket daemon for SilkAI: OpenAI-style chat, decisions, and generated files on top of the GPU scheduler"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
