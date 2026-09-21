@@ -292,7 +292,7 @@ fn print_model(model: &ConfiguredModel, issues: &[String]) {
 fn model_issues(model: &ConfiguredModel) -> Vec<String> {
     let mut issues = Vec::new();
     match model.engine.as_str() {
-        "process" => {
+        "process" | "sdcpp" => {
             match model.cmd.first() {
                 None => issues.push("cmd is empty".into()),
                 Some(bin) if !executable_exists(bin) => {
@@ -306,6 +306,7 @@ fn model_issues(model: &ConfiguredModel) -> Vec<String> {
                 }
             }
             check_url(model, &mut issues);
+            check_output_dir(model, &mut issues);
         }
         "llama.cpp" => {
             if !Path::new(&model.path).exists() {
@@ -320,6 +321,24 @@ fn model_issues(model: &ConfiguredModel) -> Vec<String> {
         other => issues.push(format!("unknown engine: {other}")),
     }
     issues
+}
+
+/// The engine creates `output_dir` itself, but not the directories above
+/// it: a typo in the path would only surface on the first finished clip.
+fn check_output_dir(model: &ConfiguredModel, issues: &mut Vec<String>) {
+    let Some(output) = &model.output else {
+        return;
+    };
+    if output.dir.exists() {
+        return;
+    }
+    match output.dir.parent() {
+        Some(parent) if parent.as_os_str().is_empty() || parent.exists() => {}
+        _ => issues.push(format!(
+            "output_dir parent missing: {}",
+            output.dir.display()
+        )),
+    }
 }
 
 fn check_url(model: &ConfiguredModel, issues: &mut Vec<String>) {
