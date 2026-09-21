@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -112,6 +112,7 @@ fn router(config_path: Option<PathBuf>, rt: Runtime, ui: UiConfig) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/events", get(events_stream))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/files/{model}/{name}", get(file_out))
         .route("/v1/session", get(crate::ws::session));
     let guarded = Router::new()
         .route("/ui", get(ui_page))
@@ -207,6 +208,37 @@ fn sse_event(e: &events::Event) -> Event {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// A file an engine produced for `model`: the clip a video reply links to.
+/// Only names the engine could have written are looked up, so nothing
+/// outside the model's output directory is reachable through here.
+async fn file_out(
+    State(state): State<Arc<AppState>>,
+    UrlPath((model, name)): UrlPath<(String, String)>,
+) -> Response {
+    if !silkai_adapters::is_output_name(&name) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(dir) = runtime_of(&state).await.output_dir(&model) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match tokio::fs::read(dir.join(&name)).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, mime_of(&name))], bytes).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+fn mime_of(name: &str) -> &'static str {
+    match name.rsplit('.').next() {
+        Some("webm") => "video/webm",
+        Some("webp") => "image/webp",
+        Some("avi") => "video/x-msvideo",
+        Some("mp4") => "video/mp4",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        _ => "application/octet-stream",
+    }
 }
 
 async fn runtime_of(state: &AppState) -> Arc<Runtime> {
@@ -768,6 +800,8 @@ fn fake_model(spec: silkai_sched::ModelSpec) -> crate::config::ConfiguredModel {
         transport: "http".into(),
         idle_timeout_secs: None,
         ctx_size: None,
+        output: None,
+        params: serde_json::Value::Null,
         spec,
     }
 }

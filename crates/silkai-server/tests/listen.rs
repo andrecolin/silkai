@@ -19,6 +19,8 @@ fn clinic_cfg() -> AppConfig {
                 transport: "http".into(),
                 idle_timeout_secs: None,
                 ctx_size: None,
+                output: None,
+                params: serde_json::Value::Null,
                 spec,
             })
             .collect(),
