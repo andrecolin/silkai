@@ -6,6 +6,17 @@ All notable changes to SilkAI. The format follows
 
 ## [Unreleased]
 
+### Added
+- `POST /v1/decision`, for a llama-server built from the
+  `parallel-decision` branch: a finite schema answered in one batched pass
+  with a probability per field, instead of generated token by token. The
+  request goes through the scheduler like a chat — the model is loaded or
+  woken, the slot is held, a preempted decision runs again from the start —
+  and the body is forwarded as it arrived, with `model` set to the name the
+  server knows; the reply is the server's own. `process` and `vllm`
+  engines forward it; an engine without the endpoint answers 400 with the
+  reason, and the model stays resident.
+
 ## [0.6.0] - 2026-09-08
 
 ### Fixed

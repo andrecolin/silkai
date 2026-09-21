@@ -198,6 +198,14 @@ impl Engine for ProcessEngine {
         self.http.run(messages, prefix, opts, cancel).await
     }
 
+    async fn decide(
+        &self,
+        body: &serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<serde_json::Value, EngineError> {
+        self.http.decide(body, cancel).await
+    }
+
     fn measured_vram_gb(&self) -> f64 {
         self.http.measured_vram_gb()
     }

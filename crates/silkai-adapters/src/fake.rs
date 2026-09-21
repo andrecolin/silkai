@@ -217,12 +217,77 @@ impl Engine for FakeEngine {
         Ok(spawn_chunks(prompt, prefix.to_string(), cancel))
     }
 
+    /// The first allowed value of every field at full confidence, once per
+    /// context, in the shape llama-server's `/v1/decision` answers. Enough
+    /// to see a whole request go out and a whole reply come back through
+    /// the router. `reject_next_run` refuses a decision as it does a chat.
+    async fn decide(
+        &self,
+        body: &serde_json::Value,
+        _cancel: CancellationToken,
+    ) -> Result<serde_json::Value, EngineError> {
+        if take_fail(&self.name, |f| &mut f.reject_run) {
+            return Err(EngineError::Rejected("schema too wide for the fake".into()));
+        }
+        if self.tier() != Tier::Bench {
+            return Err(EngineError::NotLoaded);
+        }
+        Ok(fake_decision(body))
+    }
+
     fn measured_vram_gb(&self) -> f64 {
         self.vram_gb
     }
 
     fn has_shelf(&self) -> bool {
         true
+    }
+}
+
+fn fake_decision(body: &serde_json::Value) -> serde_json::Value {
+    let schema = body.get("schema").and_then(serde_json::Value::as_object);
+    let fields: serde_json::Map<String, serde_json::Value> = schema
+        .into_iter()
+        .flatten()
+        .map(|(name, spec)| {
+            let value = first_allowed(spec);
+            let field = serde_json::json!({"value": value, "probability": 1.0});
+            (name.clone(), field)
+        })
+        .collect();
+    let decision: serde_json::Map<String, serde_json::Value> = fields
+        .iter()
+        .map(|(name, field)| (name.clone(), field["value"].clone()))
+        .collect();
+    let contexts = body
+        .get("contexts")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(1);
+    let results: Vec<serde_json::Value> = (0..contexts)
+        .map(|_| serde_json::json!({"decision": decision, "fields": fields}))
+        .collect();
+    serde_json::json!({
+        "object": "decision",
+        "results": results,
+        "usage": {"prompt_tokens": 7, "cached_tokens": 0},
+    })
+}
+
+/// `true` for a boolean, the minimum for a number, the first choice for an
+/// enum, and `null` for a field the fake does not understand.
+fn first_allowed(spec: &serde_json::Value) -> serde_json::Value {
+    match spec.get("type").and_then(serde_json::Value::as_str) {
+        Some("boolean") => serde_json::json!(true),
+        Some("integer") | Some("number") => {
+            spec.get("minimum").cloned().unwrap_or(serde_json::json!(0))
+        }
+        _ => spec
+            .get("choices")
+            .or_else(|| spec.get("enum"))
+            .and_then(|c| c.get(0))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
     }
 }
 
@@ -296,6 +361,38 @@ mod tests {
     use super::*;
     use crate::Engine;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn fake_decide_answers_every_field_per_context() {
+        let e = FakeEngine::new("decider", 1.0);
+        e.load("/x", 0).await.unwrap();
+        let body = serde_json::json!({
+            "schema": {
+                "category": {"type": "enum", "choices": ["billing", "technical"]},
+                "urgent": {"type": "boolean"},
+                "priority": {"type": "integer", "minimum": 1, "maximum": 5}
+            },
+            "contexts": ["charged twice", "app crashes"]
+        });
+        let out = e.decide(&body, CancellationToken::new()).await.unwrap();
+        assert_eq!(out["object"], "decision");
+        let results = out["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[1]["decision"]["category"], "billing");
+        assert_eq!(results[1]["decision"]["urgent"], true);
+        assert_eq!(results[1]["decision"]["priority"], 1);
+        assert_eq!(results[0]["fields"]["category"]["probability"], 1.0);
+    }
+
+    #[tokio::test]
+    async fn fake_decide_needs_the_bench() {
+        let e = FakeEngine::new("unloaded-decider", 1.0);
+        let err = e
+            .decide(&serde_json::json!({}), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::NotLoaded));
+    }
 
     #[tokio::test]
     async fn fake_load_sleep_wake_records_order() {

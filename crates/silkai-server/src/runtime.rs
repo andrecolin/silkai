@@ -39,16 +39,32 @@ pub enum RuntimeError {
     Engine(#[from] EngineError),
 }
 
+/// A queued job: the model it wants, and what it does once that model is
+/// on the card.
 struct Waiter {
     model: String,
-    messages: Vec<ChatMessage>,
-    opts: RunOptions,
-    emitted: String,
-    /// Set once this job has been preempted and restarted from `emitted`.
-    /// The engine's counts then cover only the last run, so they are dropped
-    /// rather than reported wrong.
-    resumed: bool,
-    tx: mpsc::Sender<Chunk>,
+    work: Work,
+}
+
+enum Work {
+    /// A chat completion, streamed as it is generated.
+    Chat {
+        messages: Vec<ChatMessage>,
+        opts: RunOptions,
+        emitted: String,
+        /// Set once this job has been preempted and restarted from `emitted`.
+        /// The engine's counts then cover only the last run, so they are
+        /// dropped rather than reported wrong.
+        resumed: bool,
+        tx: mpsc::Sender<Chunk>,
+    },
+    /// One `/v1/decision` request, answered whole. Nothing streams and
+    /// nothing reaches the client before the reply, so a preempted decision
+    /// has nothing to resume: it runs again from the start.
+    Decision {
+        body: serde_json::Value,
+        tx: mpsc::Sender<serde_json::Value>,
+    },
 }
 
 struct Inner {
@@ -224,7 +240,29 @@ impl Runtime {
         self.ensure_enabled(model)?;
         self.ensure_available(model)?;
         let (tx, rx) = mpsc::channel(16);
-        let job_id = self.accept(model, messages, opts, tx).await?;
+        let work = Work::Chat {
+            messages,
+            opts,
+            emitted: String::new(),
+            resumed: false,
+            tx,
+        };
+        let job_id = self.accept(model, work).await?;
+        Ok((job_id, rx))
+    }
+
+    /// Queue one decision for `model`; the reply arrives whole on the
+    /// receiver. A channel that closes with nothing on it means the engine
+    /// refused the request, and [`Runtime::take_rejection`] says why.
+    pub async fn submit_decision(
+        &self,
+        model: &str,
+        body: serde_json::Value,
+    ) -> Result<(JobId, mpsc::Receiver<serde_json::Value>), RuntimeError> {
+        self.ensure_enabled(model)?;
+        self.ensure_available(model)?;
+        let (tx, rx) = mpsc::channel(1);
+        let job_id = self.accept(model, Work::Decision { body, tx }).await?;
         Ok((job_id, rx))
     }
 
@@ -459,20 +497,14 @@ impl Runtime {
         }
     }
 
-    async fn accept(
-        &self,
-        model: &str,
-        messages: Vec<ChatMessage>,
-        opts: RunOptions,
-        tx: mpsc::Sender<Chunk>,
-    ) -> Result<JobId, RuntimeError> {
+    async fn accept(&self, model: &str, work: Work) -> Result<JobId, RuntimeError> {
         let (job_id, actions) = {
             let mut sched = self.inner.scheduler.lock().await;
             let (job_id, actions) = match sched.submit(model) {
                 SubmitResult::Accepted { job_id, actions } => (job_id, actions),
                 SubmitResult::Rejected { reason } => return Err(reject_err(reason)),
             };
-            self.store_waiter(job_id, model, messages, opts, tx).await;
+            self.store_waiter(job_id, model, work).await;
             // The scheduler has already moved models in its own books;
             // publish that now so status is truthful while the engines
             // catch up.
@@ -555,37 +587,42 @@ impl Runtime {
         *self.inner.snapshot.lock().expect("status mutex") = sched.status();
     }
 
-    async fn store_waiter(
-        &self,
-        job_id: JobId,
-        model: &str,
-        messages: Vec<ChatMessage>,
-        opts: RunOptions,
-        tx: mpsc::Sender<Chunk>,
-    ) {
+    async fn store_waiter(&self, job_id: JobId, model: &str, work: Work) {
         let waiter = Waiter {
             model: model.to_string(),
-            messages,
-            opts,
-            emitted: String::new(),
-            resumed: false,
-            tx,
+            work,
         };
         self.inner.waiters.lock().await.insert(job_id, waiter);
     }
 
-    async fn waiter(
+    /// What a chat job runs with: its messages, the text already streamed,
+    /// its options, and where the tokens go. `None` for a decision.
+    async fn chat_work(
         &self,
         job_id: JobId,
     ) -> Option<(Vec<ChatMessage>, String, RunOptions, mpsc::Sender<Chunk>)> {
-        self.inner.waiters.lock().await.get(&job_id).map(|w| {
-            (
-                w.messages.clone(),
-                w.emitted.clone(),
-                w.opts.clone(),
-                w.tx.clone(),
-            )
-        })
+        match &self.inner.waiters.lock().await.get(&job_id)?.work {
+            Work::Chat {
+                messages,
+                opts,
+                emitted,
+                tx,
+                ..
+            } => Some((messages.clone(), emitted.clone(), opts.clone(), tx.clone())),
+            Work::Decision { .. } => None,
+        }
+    }
+
+    /// The request a decision job forwards and where its reply goes.
+    /// `None` for a chat.
+    async fn decision_work(
+        &self,
+        job_id: JobId,
+    ) -> Option<(serde_json::Value, mpsc::Sender<serde_json::Value>)> {
+        match &self.inner.waiters.lock().await.get(&job_id)?.work {
+            Work::Decision { body, tx } => Some((body.clone(), tx.clone())),
+            Work::Chat { .. } => None,
+        }
     }
 
     async fn waiter_model(&self, job_id: JobId) -> Option<String> {
@@ -600,8 +637,12 @@ impl Runtime {
     /// Note that this job is starting again from text already sent, so the
     /// counts the engine reports at the end will not describe the whole run.
     async fn mark_resumed(&self, job_id: JobId) {
-        if let Some(w) = self.inner.waiters.lock().await.get_mut(&job_id) {
-            w.resumed = true;
+        if let Some(Waiter {
+            work: Work::Chat { resumed, .. },
+            ..
+        }) = self.inner.waiters.lock().await.get_mut(&job_id)
+        {
+            *resumed = true;
         }
     }
 
@@ -612,13 +653,13 @@ impl Runtime {
     /// text already streamed and whose completion is only the remainder, and
     /// a wrong count is worse than none.
     async fn settle_end(&self, job_id: JobId, end: RunEnd) -> RunEnd {
-        let resumed = self
-            .inner
-            .waiters
-            .lock()
-            .await
-            .get(&job_id)
-            .is_some_and(|w| w.resumed);
+        let resumed = matches!(
+            self.inner.waiters.lock().await.get(&job_id),
+            Some(Waiter {
+                work: Work::Chat { resumed: true, .. },
+                ..
+            })
+        );
         if resumed {
             RunEnd { usage: None, ..end }
         } else {
@@ -627,8 +668,12 @@ impl Runtime {
     }
 
     async fn append_emitted(&self, job_id: JobId, chunk: &str) {
-        if let Some(w) = self.inner.waiters.lock().await.get_mut(&job_id) {
-            w.emitted.push_str(chunk);
+        if let Some(Waiter {
+            work: Work::Chat { emitted, .. },
+            ..
+        }) = self.inner.waiters.lock().await.get_mut(&job_id)
+        {
+            emitted.push_str(chunk);
         }
     }
 
@@ -838,7 +883,10 @@ impl Runtime {
     }
 
     async fn start(&self, job_id: JobId, model: &str) -> Result<(), RuntimeError> {
-        let Some((messages, prefix, opts, tx)) = self.waiter(job_id).await else {
+        if let Some((body, tx)) = self.decision_work(job_id).await {
+            return self.start_decision(job_id, model, body, tx).await;
+        }
+        let Some((messages, prefix, opts, tx)) = self.chat_work(job_id).await else {
             return Ok(());
         };
         if !prefix.is_empty() {
@@ -858,6 +906,44 @@ impl Runtime {
         let model = model.to_string();
         tokio::spawn(async move {
             forward_job(job_id, model, rx, tx, token, rt).await;
+        });
+        Ok(())
+    }
+
+    /// A decision is one call, not a stream. It is awaited off the applier
+    /// so the scheduler is free meanwhile, and the job finishes when the
+    /// reply lands. A preempt cancels the call and leaves the job queued;
+    /// it runs again from the start, since nothing reached the client. An
+    /// engine that refuses or fails the call ends the job with its reason,
+    /// as a refused chat does, and the model stays resident.
+    async fn start_decision(
+        &self,
+        job_id: JobId,
+        model: &str,
+        body: serde_json::Value,
+        tx: mpsc::Sender<serde_json::Value>,
+    ) -> Result<(), RuntimeError> {
+        let token = self.watch(job_id).await;
+        let engine = Arc::clone(self.engine(model)?);
+        let rt = self.clone();
+        let model = model.to_string();
+        tokio::spawn(async move {
+            let answer = tokio::select! {
+                _ = token.cancelled() => return,
+                answer = engine.decide(&body, token.clone()) => answer,
+            };
+            match answer {
+                Ok(value) => {
+                    let _ = tx.send(value).await;
+                }
+                Err(err) => {
+                    rt.reject(job_id, &model, err.to_string());
+                    return;
+                }
+            }
+            if let Ok(actions) = rt.release_job(job_id).await {
+                rt.enqueue_apply(actions);
+            }
         });
         Ok(())
     }

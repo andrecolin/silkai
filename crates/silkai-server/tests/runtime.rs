@@ -211,6 +211,65 @@ async fn process_submit_streams_from_spawned_http() {
     assert_eq!(out, "hello world");
 }
 
+/// Wait for the scheduler to book the job finished; a decision's reply is
+/// handed over before its job is released.
+async fn wait_idle(rt: &Runtime, model: &str) {
+    for _ in 0..100 {
+        let running = rt
+            .status()
+            .models
+            .iter()
+            .find(|m| m.name == model)
+            .map(|m| m.running)
+            .unwrap_or(0);
+        if running == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{model} still running");
+}
+
+#[tokio::test]
+async fn process_decision_forwards_the_body_and_returns_the_reply() {
+    let url = spawn_vllm_mock().await;
+    let rt = Runtime::new(process_soap_cfg(Some(&url))).await.unwrap();
+    let body = serde_json::json!({
+        "model": "soap",
+        "instructions": "Answer from the ticket.",
+        "schema": {"urgent": {"type": "boolean"}},
+        "contexts": ["charged twice"],
+        "mode": "tree"
+    });
+    let (_job, mut rx) = rt.submit_decision("soap", body).await.unwrap();
+    let answer = rx.recv().await.expect("a reply");
+    assert_eq!(answer["object"], "decision");
+    // Everything the client sent went through, and `model` became the name
+    // the server knows the weights by.
+    let sent = &answer["echo"];
+    assert_eq!(sent["model"], "Qwen/Qwen3-0.6B");
+    assert_eq!(sent["instructions"], "Answer from the ticket.");
+    assert_eq!(sent["schema"]["urgent"]["type"], "boolean");
+    assert_eq!(sent["contexts"][0], "charged twice");
+    assert_eq!(sent["mode"], "tree");
+    wait_idle(&rt, "soap").await;
+}
+
+#[tokio::test]
+async fn process_decision_refusal_carries_the_servers_reason() {
+    let url = spawn_vllm_mock().await;
+    let rt = Runtime::new(process_soap_cfg(Some(&url))).await.unwrap();
+    // No schema: the mock answers 400 the way llama-server does.
+    let body = serde_json::json!({"model": "soap", "contexts": ["x"]});
+    let (job, mut rx) = rt.submit_decision("soap", body).await.unwrap();
+    assert!(rx.recv().await.is_none(), "a refusal carries no reply");
+    wait_idle(&rt, "soap").await;
+    assert_eq!(
+        rt.take_rejection(job).as_deref(),
+        Some("schema is required")
+    );
+}
+
 fn ollama_soap_cfg(url: Option<&str>) -> AppConfig {
     let mut cfg = clinic_cfg();
     for model in &mut cfg.enabled {
@@ -481,7 +540,8 @@ async fn spawn_vllm_mock() -> String {
         .route("/sleep", post(vllm_ok))
         .route("/wake_up", post(vllm_ok))
         .route("/health", get(vllm_ok))
-        .route("/v1/chat/completions", post(vllm_chat_sse));
+        .route("/v1/chat/completions", post(vllm_chat_sse))
+        .route("/v1/decision", post(vllm_decision));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -502,6 +562,26 @@ async fn vllm_chat_sse() -> impl IntoResponse {
             "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
             "data: [DONE]\n\n",
         ),
+    )
+}
+
+/// Answers like the `parallel-decision` llama-server, with the request
+/// echoed back so a test can see what reached it. A body with no `schema`
+/// is refused with the OpenAI-shaped error llama-server sends.
+async fn vllm_decision(axum::Json(body): axum::Json<serde_json::Value>) -> impl IntoResponse {
+    if body.get("schema").is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": {"message": "schema is required"}})),
+        );
+    }
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "object": "decision",
+            "results": [{"decision": {"urgent": true}}],
+            "echo": body,
+        })),
     )
 }
 

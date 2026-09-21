@@ -52,6 +52,8 @@ cmd = ["llama-server",
        "--alias", "soap", "--host", "127.0.0.1", "--port", "8102",
        "--ctx-size", "16384", "--n-gpu-layers", "999",
        "--jinja", "--reasoning-budget", "0", "--no-webui"]
+# A llama-server from the parallel-decision branch also answers
+# POST /v1/decision; add "--decision-seqs", "24" to switch it on.
 vram_gb = 26
 priority = "normal"
 exclusive = true
