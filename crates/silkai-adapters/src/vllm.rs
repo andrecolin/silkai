@@ -131,6 +131,40 @@ impl Engine for VllmEngine {
         Ok(rx)
     }
 
+    /// `POST /v1/decision`, forwarded whole. A non-2xx is the engine
+    /// refusing this request, not the engine failing — a bad schema comes
+    /// back as 400 with the server's own message, exactly as a prompt too
+    /// long for the window does on chat.
+    async fn decide(
+        &self,
+        body: &serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<serde_json::Value, EngineError> {
+        if !self.on_bench() {
+            return Err(EngineError::NotLoaded);
+        }
+        let model = self.stored_model()?;
+        let url = format!("{}/v1/decision", self.url);
+        let mut body = body.clone();
+        // The name the server knows the weights by, as chat sends it: a
+        // single-model llama-server ignores it, a router picks by it.
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("model".into(), serde_json::json!(model));
+        }
+        let send = self.client.post(url).json(&body).send();
+        let resp = tokio::select! {
+            _ = cancel.cancelled() => return Err(EngineError::Other("cancelled".into())),
+            result = send => result
+                .map_err(|err| EngineError::Rejected(format!("engine request failed: {err}")))?,
+        };
+        if !resp.status().is_success() {
+            return Err(EngineError::Rejected(rejection_of(resp).await));
+        }
+        resp.json()
+            .await
+            .map_err(|err| EngineError::Rejected(format!("engine reply unreadable: {err}")))
+    }
+
     fn measured_vram_gb(&self) -> f64 {
         self.vram_gb
     }

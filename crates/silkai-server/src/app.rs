@@ -112,6 +112,7 @@ fn router(config_path: Option<PathBuf>, rt: Runtime, ui: UiConfig) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/events", get(events_stream))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/decision", post(decision))
         .route("/v1/files/{model}/{name}", get(file_out))
         .route("/v1/session", get(crate::ws::session));
     let guarded = Router::new()
@@ -340,7 +341,49 @@ async fn chat_completions(
             let meta = Meta::new(job, model);
             finish_chat(&rt, meta, rx, req.stream).await
         }
-        Err(err) => chat_error(err).into_response(),
+        Err(err) => submit_error(err).into_response(),
+    }
+}
+
+/// `POST /v1/decision`: a finite schema answered in one pass, for a model
+/// whose engine has the endpoint (llama-server built from the
+/// `parallel-decision` branch). Only `model` is read here, to queue the job
+/// like any other; the body goes to the engine as it arrived and the reply
+/// comes back as the engine wrote it, so the schema and the answer shape
+/// are the engine's documentation, not ours.
+async fn decision(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let Some(model) = body.get("model").and_then(|m| m.as_str()) else {
+        return (StatusCode::BAD_REQUEST, "model is required").into_response();
+    };
+    let model = model.to_string();
+    let rt = runtime_of(&state).await;
+    match rt.submit_decision(&model, body).await {
+        Ok((job, rx)) => decision_or_timeout(&rt, job, rx).await,
+        Err(err) => submit_error(err).into_response(),
+    }
+}
+
+async fn decision_or_timeout(
+    rt: &Runtime,
+    job: JobId,
+    mut rx: mpsc::Receiver<serde_json::Value>,
+) -> Response {
+    match tokio::time::timeout(rt.request_timeout(), rx.recv()).await {
+        Ok(Some(answer)) => Json(answer).into_response(),
+        // The channel closed with nothing on it: the engine refused, and
+        // said why, or the job ended without an answer.
+        Ok(None) => match rt.take_rejection(job) {
+            Some(reason) => (StatusCode::BAD_REQUEST, reason).into_response(),
+            None => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "decision ended without an answer",
+            )
+                .into_response(),
+        },
+        Err(_) => timeout_drop(rt, job).await,
     }
 }
 
@@ -717,7 +760,7 @@ fn finish_of(end: &RunEnd) -> &str {
 
 /// Status plus the reason as the body, so a client sees why instead of a
 /// bare code.
-fn chat_error(err: RuntimeError) -> (StatusCode, String) {
+fn submit_error(err: RuntimeError) -> (StatusCode, String) {
     let status = match err {
         RuntimeError::Unknown => StatusCode::NOT_FOUND,
         RuntimeError::Disabled | RuntimeError::TooLarge => StatusCode::BAD_REQUEST,

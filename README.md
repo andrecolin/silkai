@@ -180,7 +180,9 @@ up to five minutes), and talks OpenAI chat to it. Parking kills the process
 group; the next wake starts it again, which is fast from the page cache. The
 child gets `CUDA_VISIBLE_DEVICES` set to the card SilkAI chose, and its
 stderr goes to SilkAI's log. Anything that speaks OpenAI chat and has a
-health endpoint works: `llama-server`, `vllm serve`, and the like.
+health endpoint works: `llama-server`, `vllm serve`, and the like. A
+llama-server with `/v1/decision` (see [Decisions](#talk-to-it)) serves
+chat and decisions from the one loaded model.
 
 **`sdcpp`**, a [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
 `sd-server` that answers a chat turn with a video. SilkAI runs the command,
@@ -333,6 +335,33 @@ carries the text already streamed and whose completion is just the
 remainder. A count that does not describe the request is worse than none.
 A request preempted mid-stream resumes from the tokens already sent; the
 client never sees a prefix twice.
+
+**Decisions.** `POST /v1/decision` is for a model whose server has the
+endpoint: llama-server built from the
+[`parallel-decision`](https://github.com/thecodacus/llama.cpp/tree/parallel-decision)
+branch, started with `--decision-seqs N`. Instead of writing an answer
+token by token, the server scores every allowed value of every field in
+your schema against the context in one pass, and returns a value and a
+probability per field — the same idea as TypeSafe's Jev, on the weights
+you already have, in tens of milliseconds. SilkAI reads `model` to queue
+the job like any chat (the model is loaded or woken, the slot is held, a
+preempted decision runs again from the start since nothing has reached
+the client) and forwards the rest of the body untouched; the reply is
+the server's own. The request and reply shapes are documented with the
+branch. Only `process` and `vllm` engines forward it; any other engine,
+and a llama-server without the endpoint, answer 400 with the reason.
+
+```bash
+curl -s http://127.0.0.1:8080/v1/decision -d '{
+  "model": "soap",
+  "instructions": "Answer each question about this support request.",
+  "schema": {
+    "category": {"type": "enum", "choices": ["billing", "technical", "other"]},
+    "urgent": {"type": "boolean"}
+  },
+  "contexts": ["I was charged twice and need this fixed today."]
+}'
+```
 
 **Sessions.** Any model with `transport = "websocket"` or `"both"` takes
 `GET /v1/session?model=whisper`. The socket says `queued`, then `live`; from

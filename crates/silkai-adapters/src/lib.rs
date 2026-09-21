@@ -245,6 +245,26 @@ pub trait Engine: Send + Sync {
     ) -> Result<mpsc::Receiver<Chunk>, EngineError>;
     fn measured_vram_gb(&self) -> f64;
 
+    /// Answer a finite schema in one pass, the way llama-server's
+    /// `/v1/decision` (the `parallel-decision` branch) does: every allowed
+    /// value of every field is scored against the context, and the reply
+    /// carries a value and a probability per field. `body` is the client's
+    /// request as it arrived; the engine sets `model` and forwards the rest,
+    /// and hands the reply back as the server wrote it. The schema is the
+    /// engine's contract with the client, not something SilkAI models. An
+    /// engine without the endpoint refuses the request, which ends the job
+    /// with a reason and leaves the model resident.
+    async fn decide(
+        &self,
+        body: &serde_json::Value,
+        cancel: CancellationToken,
+    ) -> Result<serde_json::Value, EngineError> {
+        let _ = (body, cancel);
+        Err(EngineError::Rejected(
+            "this engine has no decision endpoint".into(),
+        ))
+    }
+
     /// Whether `sleep` keeps a copy in host RAM that `wake` restores without
     /// touching disk. Engines that kill a child or re-read the file say no,
     /// so status does not report RAM that is not held.
