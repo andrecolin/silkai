@@ -1,18 +1,22 @@
 //! Engines SilkAI can place on a card: a managed child process speaking
-//! OpenAI chat (llama-server, vLLM), HTTP adapters for vLLM and Ollama, an
-//! optional in-process llama.cpp behind `--features llama`, and a fake for
-//! tests. The [`Engine`] trait is what the runtime drives: warm, load, wake,
+//! OpenAI chat (llama-server, vLLM), a managed stable-diffusion.cpp
+//! `sd-server` that answers a chat turn with a generated video, HTTP
+//! adapters for vLLM and Ollama, an optional in-process llama.cpp behind
+//! `--features llama`, and a fake for tests. The [`Engine`] trait is what the runtime drives: warm, load, wake,
 //! sleep, discard, run.
 
+mod child;
 mod fake;
 mod llama;
 mod ollama;
 mod process;
+mod sdcpp;
 mod vllm;
 pub use fake::FakeEngine;
 pub use llama::LlamaEngine;
 pub use ollama::OllamaEngine;
 pub use process::ProcessEngine;
+pub use sdcpp::{is_output_name, SdcppEngine, SdcppOutput};
 pub use vllm::VllmEngine;
 
 use std::borrow::Cow;
