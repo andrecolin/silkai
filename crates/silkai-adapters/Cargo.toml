@@ -20,7 +20,7 @@ metal = ["llama", "llama-cpp-2/metal"]
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.22"
+base64 = "0.23"
 llama-cpp-2 = { version = "0.1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
